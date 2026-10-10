@@ -1,153 +1,166 @@
-# -*- coding: utf-8 -*-
-import time, json, urllib3, requests
-from rule import Rule  # המחלקה קיימת אצלך
+"""FMC REST reader. Authentication must be invoked explicitly."""
+import json
+from urllib.parse import quote
+from transport import Transport
+from errors import APIError, ValidationError
+from normalization import networks, service
+from rule import Rule
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# פרמטרי התחברות
-FMC_HOST = "<REDACTED_FMC_HOST>"
-FMC_USER = ""
-FMC_PASS = ""
-POLICY_NAME = "<REDACTED_POLICY_NAME>"
-AUTH_URL = f"https://{FMC_HOST}/api/fmc_platform/v1/auth/generatetoken"
-
-# פוקוס על מהירות הקריאות (429)
-CALLS_PER_SECOND = 1  # בקשה לשנייה – נמנע ממגבלת ה-API
-SLEEP_TIME = 0.5
-
-print("Enter FMC username")
-FMC_USER = input()
-print("Enter FMC password")
-FMC_PASS = input()
-session = requests.session()
+ENDPOINTS = {'Host': 'hosts', 'Network': 'networks', 'Range': 'ranges',
+             'NetworkGroup': 'networkgroups', 'ProtocolPortObject': 'protocolportobjects',
+             'PortObjectGroup': 'portobjectgroups'}
 
 
-def safe_get(url, **kwargs):
-    """קריאה ל-API עם טיפול במצב 429 ו-retry."""
-    for attempt in range(5):  # עד 5 ניסיונות
-        resp = session.get(url, **kwargs, verify=False)
-        if resp.status_code == 429:  # קריאה מוגזמת
-            wait = int(resp.headers.get('Retry-After', 2))
-            time.sleep(wait)
-            continue
-        resp.raise_for_status()
-        return resp
-    raise Exception(f"Too many 429 responses from {url}")
+class FMCClient(Transport):
+    def __init__(self, base_url, domain=None, **kwargs):
+        super().__init__(base_url, **kwargs)
+        self.domain, self.token, self.cache = domain, None, {}
 
+    def login(self, username, password):
+        response = self.request('POST', '/api/fmc_platform/v1/auth/generatetoken', auth=(username, password))
+        try:
+            token = response.headers['X-auth-access-token']
+            domains = json.loads(response.headers['DOMAINS'])
+            if self.domain is None:
+                if len(domains) != 1:
+                    raise ValueError()
+                self.domain = domains[0]['uuid']
+            if self.domain not in [d['uuid'] for d in domains] or not token:
+                raise ValueError()
+        except (KeyError, ValueError, TypeError):
+            raise APIError('Invalid token or ambiguous FMC domain') from None
+        self.token, self.cache = token, {}
 
-def safe_post(url, **kwargs):
-    """POST עם טיפול באותו האופן – לא קיים בקוד שלנו, רק אם נצטרך."""
-    for attempt in range(5):
-        resp = session.post(url, **kwargs, verify=False)
-        if resp.status_code == 429:
-            wait = int(resp.headers.get('Retry-After', 2))
-            time.sleep(wait)
-            continue
-        resp.raise_for_status()
-        return resp
-    raise Exception(f"Too many 429 responses from {url}")
+    def get(self, path, **kwargs):
+        if not self.token or not self.domain:
+            raise APIError('FMC login required')
+        response = self.request('GET', '/api/fmc_config/v1/domain/' + quote(self.domain, safe='') + path,
+                                headers={'X-auth-access-token': self.token}, **kwargs)
+        try:
+            data = response.json()
+            if not isinstance(data, dict):
+                raise ValueError()
+            return data
+        except ValueError:
+            raise APIError('Invalid FMC JSON') from None
 
+    def collection(self, path):
+        offset, total, seen = 0, None, set()
+        result = []
+        while True:
+            data = self.get(path, params={'offset': offset, 'limit': 1000, 'expanded': 'true'})
+            items, paging = data.get('items'), data.get('paging', {})
+            if not isinstance(items, list) or not isinstance(paging, dict):
+                raise ValidationError('Invalid FMC collection')
+            count = paging.get('count')
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise ValidationError('Missing FMC total count')
+            if total is not None and count != total:
+                raise ValidationError('FMC collection changed during pagination')
+            total = count
+            for item in items:
+                if not isinstance(item, dict) or not item.get('id') or item['id'] in seen:
+                    raise ValidationError('Missing or repeated FMC item ID')
+                seen.add(item['id'])
+            result.extend(items)
+            offset += len(items)
+            if offset == total:
+                return result
+            if not items or offset > total:
+                raise ValidationError('Incomplete FMC pagination')
 
-# קבלת Token
-time.sleep(SLEEP_TIME)
-auth_resp = safe_post(AUTH_URL, auth=(FMC_USER, FMC_PASS))
-token = auth_resp.headers["X-auth-access-token"]
-domains = json.loads(auth_resp.headers.get("DOMAINS", "[]"))
-DOMAIN_UUID = domains[0]["uuid"]
-BASE_URL = f"https://{FMC_HOST}/api/fmc_config/v1/domain/{DOMAIN_UUID}"
+    def policy_uuid_by_name(self, name):
+        matches = [p['id'] for p in self.collection('/policy/accesspolicies') if p.get('name') == name]
+        if len(matches) != 1:
+            raise ValidationError('Policy name must match exactly one FMC policy')
+        return matches[0]
 
-ports_cache = {}  # מפתח: שם האובייקט (או ID), ערך: set של פורטים
+    def resolve(self, ref, kind, stack=()):
+        typ, ident = ref.get('type'), ref.get('id')
+        key = (typ, ident, kind)
+        if typ not in ENDPOINTS or not ident:
+            raise ValidationError('Unsupported FMC object reference')
+        if key in stack:
+            raise ValidationError('Cyclic FMC object group')
+        if key in self.cache:
+            return self.cache[key]
+        obj = self.get('/object/' + ENDPOINTS[typ] + '/' + quote(ident, safe=''))
+        if obj.get('type') != typ or obj.get('id') != ident or obj.get('overrides') or obj.get('overridable'):
+            raise ValidationError('Invalid FMC object or unresolved override')
+        values = set()
+        if typ in ('NetworkGroup', 'PortObjectGroup'):
+            for member in obj.get('objects', []):
+                values.update(self.resolve(member, kind, stack + (key,)))
+            literals = obj.get('literals', obj.get('literal', []))
+            for lit in literals:
+                values.update(self.literal(lit, kind))
+        else:
+            values.update(self.literal(obj, kind))
+        if not values:
+            raise ValidationError('Empty FMC object')
+        self.cache[key] = frozenset(values)
+        return self.cache[key]
 
-# שליפת מדיניות משם
-policies_resp = safe_get(
-    f"{BASE_URL}/policy/accesspolicies",
-    headers={"X-auth-access-token": token},
-    params={"limit": 1000},
-)
-policies = policies_resp.json()
+    @staticmethod
+    def literal(obj, kind):
+        if kind == 'network':
+            if obj.get('type') not in ('Host', 'Network', 'Range') or 'value' not in obj:
+                raise ValidationError('Unsupported FMC network literal')
+            return networks([obj['value']])
+        if obj.get('type') not in ('PortLiteral', 'ProtocolPortObject') or 'protocol' not in obj:
+            raise ValidationError('Unsupported FMC service literal')
+        return service(obj['protocol'], obj.get('port'))
 
-
-def policy_uuid_by_name(name: str):
-    for p in policies["items"]:
-        if p["name"] == name:
-            return p["id"]
-    return None
-
-
-# פונקציה רקורסיבית לקבלת כל הפורטים של Service
-def get_all_ports(service_obj):
-    """
-    מקבלת Service Object (PortObjectGroup או ProtocolPortObject)
-    ומחזירה set של כל הפורטים (כולל קבוצות מקוננות).
-    """
-    name = service_obj["name"]
-    if name in ports_cache:  # כבר במטמון
-        return ports_cache[name]
-    all_ports = set()
-    obj_type = service_obj["type"]
-    if obj_type == "PortObjectGroup":
-        # שלוף את הקבוצה
-        time.sleep(SLEEP_TIME)
-        grp_resp = safe_get(
-            f"{BASE_URL}/object/portobjectgroups/{service_obj['id']}",
-            headers={"X-auth-access-token": token},
-        )
-        group = grp_resp.json()
-        # פורטים מילוליים בתוך הקבוצה
-        for lit in group.get("literal", []):
-            if lit.get("port"):
-                all_ports.add(lit["port"])
-        # חברי קבוצה – יכולים להיות גם קבוצות נוספות
-        for member in group.get("objects", []):
-            all_ports.update(get_all_ports(member))
-    elif obj_type == "ProtocolPortObject":
-        time.sleep(SLEEP_TIME)
-        port_resp = safe_get(
-            f"{BASE_URL}/object/protocolportobjects/{service_obj['id']}",
-            headers={"X-auth-access-token": token},
-        )
-        port = port_resp.json().get("port")
-        if port:
-            all_ports.add(port)
-    # שמירת תוצאה במטמון למניעת חזרות מיותרות
-    ports_cache[name] = all_ports
-    return all_ports
-
-
-# שליפת חוקים של מדיניות
-def policy_rules(policy_uuid):
-    time.sleep(SLEEP_TIME)
-    rules_resp = safe_get(
-        f"{BASE_URL}/policy/accesspolicies/{policy_uuid}/accessrules",
-        headers={"X-auth-access-token": token},
-        params={"limit": 1000, "expanded": True},
-    )
-    rules = rules_resp.json()["items"]
-    rules_list = []
-    for i, rule in enumerate(rules):
-        src = [obj["name"] for obj in rule.get("sourceNetworks", {}).get("objects", [])]
-        dst = [obj["name"] for obj in rule.get("destinationNetworks", {}).get("objects", [])]
-        svc_objs = rule.get("destinationPorts", {}).get("objects", [])
-        svc_lit = rule.get("destinationPorts", {}).get("literals", [])
-        #     print(f'svc_objs: {svc_objs}')
-        #     print(f'svc_lit: {svc_lit}')
-        all_ports = set()
-        for svc in svc_objs:
-            all_ports.update(get_all_ports(svc))
-        for lit in svc_lit:
-            port = lit.get('port')
-            all_ports.add(port)
-        rules_list.append(
-            Rule(
-                rule_number=i + 1,
-                source_objects=src,
-                destination_objects=dst,
-                destination_services=list(all_ports),
-            )
-        )
-    for rule in rules_list:
-        if rule.destination_services[0] is None:
-            rule.destination_services = []
-    return rules_list
-
+    def policy_rules(self, policy_uuid):
+        self.cache.clear()  # no stale object values across comparisons
+        result = []
+        for index, raw in enumerate(self.collection('/policy/accesspolicies/' + quote(policy_uuid, safe='') + '/accessrules')):
+            issues, objects = [], {}
+            def field(name, kind):
+                container = raw.get(name, {})
+                if not isinstance(container, dict) or container.keys() - {'objects', 'literals'}:
+                    raise ValidationError('Unsupported FMC rule container')
+                values, names = set(), []
+                for ref in container.get('objects', []):
+                    resolved = self.resolve(ref, kind)
+                    label = ref.get('name', ref['id'])
+                    names.append(label)
+                    if label in objects and objects[label] != sorted(resolved):
+                        raise ValidationError('Conflicting FMC object names')
+                    objects[label] = sorted(resolved)
+                    values.update(resolved)
+                for i, lit in enumerate(container.get('literals', [])):
+                    resolved = self.literal(lit, kind)
+                    label = f'@{name}:{i}'
+                    names.append(label)
+                    objects[label] = sorted(resolved)
+                    values.update(resolved)
+                if not names:
+                    if kind == 'network':
+                        names = ['@any']
+                        objects['@any'] = ['0.0.0.0/0', '::/0']
+                    else:
+                        values = service('ip')
+                return names if kind == 'network' else sorted(values)
+            for key in ('sourcePorts', 'sourceZones', 'destinationZones', 'users', 'applications', 'urls', 'vlanTags', 'sourceSecurityGroupTags', 'destinationSecurityGroupTags', 'timeRange', 'sourceDynamicObjects', 'destinationDynamicObjects'):
+                if raw.get(key):
+                    issues.append('Unsupported FMC constraint: ' + key)
+            supported = {'id', 'name', 'type', 'links', 'metadata', 'action', 'enabled',
+                         'sourceNetworks', 'destinationNetworks', 'destinationPorts',
+                         'sendEventsToFMC', 'logBegin', 'logEnd', 'logFiles', 'enableSyslog',
+                         'syslogConfig', 'variableSet', 'ruleIndex', 'category', 'section'}
+            for key in raw.keys() - supported:
+                if raw[key]:
+                    issues.append('Unreviewed FMC rule field: ' + key)
+            if raw.get('action') not in ('ALLOW', 'BLOCK'):
+                issues.append('Unsupported FMC action')
+            if not isinstance(raw.get('enabled'), bool):
+                issues.append('Missing FMC enabled state')
+            src = field('sourceNetworks', 'network')
+            dst = field('destinationNetworks', 'network')
+            svc = field('destinationPorts', 'service')
+            result.append(Rule(raw['id'], src, dst, svc,
+                               'DROP' if raw.get('action') == 'BLOCK' else 'ALLOW',
+                               raw.get('enabled'), objects, issues))
+        return result
 

@@ -3,7 +3,7 @@ import argparse
 import json
 from rule import Rule
 from normalization import services, networks
-from errors import ValidationError
+from errors import ValidationError, APIError
 
 
 def signature(rule):
@@ -11,6 +11,11 @@ def signature(rule):
         raise ValidationError('; '.join(rule.issues))
     if rule.action not in ('ALLOW', 'DROP') or not isinstance(rule.enabled, bool):
         raise ValidationError('Invalid action or enabled state')
+    for values in (rule.source_objects, rule.destination_objects, rule.destination_services):
+        if not isinstance(values, (list, tuple, set, frozenset)) or any(v is None for v in values):
+            raise ValidationError('Invalid rule field')
+    if rule.object_values and any(not values for values in rule.object_values.values()):
+        raise ValidationError('Empty resolved object')
     def net(values):
         if rule.object_values:
             try:
@@ -36,7 +41,7 @@ def compare_rules(source, target, allow_empty=False):
         for r in rules:
             try:
                 signature(r)
-            except ValidationError as exc:
+            except (ValidationError, TypeError, ValueError) as exc:
                 errors.append(f'{side} rule {r.rule_number}: {exc}')
     if errors:
         return dict(status='INDETERMINATE', errors=errors, missing=[], extra=[], changed_objects=[])
@@ -61,6 +66,17 @@ def compare_rules(source, target, allow_empty=False):
                     services=sorted(services(r.destination_services)))
     return dict(status='FAIL' if missing or extra else 'PASS', errors=[],
                 missing=[detail(r) for r in missing], extra=[detail(r) for r in extra], changed_objects=changed)
+
+
+def compare_policies(csm_client, csm_name, fmc_client, fmc_name):
+    """Use only with explicitly authorized, already authenticated clients."""
+    try:
+        source = csm_client.policy_rules(csm_name)
+        target = fmc_client.policy_rules(fmc_client.policy_uuid_by_name(fmc_name))
+        return compare_rules(source, target)
+    except (APIError, ValidationError, KeyError, TypeError, ValueError):
+        return dict(status='INDETERMINATE', errors=['Policy retrieval or parsing failed'],
+                    missing=[], extra=[], changed_objects=[])
 
 
 def main():

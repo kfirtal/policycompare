@@ -1,8 +1,9 @@
-﻿# Python
+# Python
 __pycache__/
 *.pyc
 .venv/
 venv/
+.deps/
 
 # Secrets
 .env
@@ -13,7 +14,8 @@ venv/
 .vscode/
 .idea/
 
-# Generated files
+# Generated and internal data
 reports/
 logs/
 snapshots/
+*.snapshot.json

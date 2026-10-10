@@ -1,226 +1,251 @@
-from rule import Rule
-import requests
-import urllib3
+"""CSM 4.25 NBI reader; no import-time authentication or requests."""
 import xml.etree.ElementTree as ET
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-base_url = "https://<REDACTED_CSM_HOST>/nbi/"
-csm_username = ""
-csm_password = ""
-Device = ""
-policy_name = "<REDACTED_POLICY_NAME>"
-gid_number = ""
-session = requests.session()
-NS = {'n': 'csm'}
-
-print("Enter CSM username")
-csm_username = input()
-print("Enter CSM password")
-csm_password = input()
-
-auth_payload = f"""<?xml version="1.0" encoding="UTF-8"?>
-<csm:loginRequest xmlns:csm="csm">
-    <protVersion>1.0</protVersion>
-    <reqId>12345</reqId>
-    <username>{csm_username}</username>
-    <password>{csm_password}</password>
-</csm:loginRequest>"""
-headers = {'Content-Type': 'text/xml'}
-try:
-    response = session.post(f"{base_url}/login", data=auth_payload,
-                            headers=headers, verify=False)
-    if response.status_code == 200:
-        cookies = response.cookies.get('asCookie')
-    else:
-        print("Login Failed")
-        print(response.text)
-except Exception as e:
-    print(f"Error:{e}")
-
-# Build the request headers
-headers = {
-    'Content-Type': 'text/xml',
-    'Cookie': f'asCookie={cookies}'  # <-- use the string we extracted above
-}
+from transport import Transport
+from errors import APIError, ValidationError
+from normalization import networks, service
+from rule import Rule
 
 
-def getGIDByName(hostname):  # Return GID
-    name_xml = f"""
-<?xml version="1.0" encoding="UTF-8"?>
-<n:deviceConfigByNameRequest xmlns:n="csm">
-    <protVersion>1.0</protVersion>
-    <reqId>123456</reqId>
-    <name>{hostname}</name>
-</n:deviceConfigByNameRequest>""".strip()
-    # generated the GID
-    response = session.post(f"{base_url}/configservice/getDeviceConfigByName",
-                            data=name_xml, headers=headers, verify=False)
-    gid = response.text.split('<gid>')[1].split('</gid>')[0]
-    return gid
-
-
-def getPolicyList(gid):  # Return Policy List
-    data_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<n:policyListByDeviceGIDRequest xmlns:n="csm">
-    <protVersion>1.0</protVersion>
-    <reqId>12345678</reqId>
-    <gid>{gid}</gid>
-</n:policyListByDeviceGIDRequest>""".strip()
-    list = session.post(f"{base_url}/configservice/getPolicyListByDeviceGID",
-                        data=data_xml, headers=headers, verify=False)
-    return list.text
-
-
-def getPolicy(policy_name):  # Return access rule policy
-    policy_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<n:policyConfigByNameRequest xmlns:n="csm">
-    <protVersion>1.0</protVersion>
-    <reqId>1234567</reqId>
-    <name>{policy_name}</name>
-    <policyType>DeviceAccessRuleFirewallPolicy</policyType>
-</n:policyConfigByNameRequest>""".strip()
-    policy = session.post(f"{base_url}/configservice/getPolicyConfigByName",
-                          data=policy_xml, headers=headers, verify=False)
-    return policy.text
-
-
-def getNameByGID(gid):
-    gid_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<csm:getPolicyObjectByGID xmlns:csm="csm">
-    <protVersion>1.0</protVersion>
-    <reqId>123456</reqId>
-    <gid>{gid}</gid>
-</csm:getPolicyObjectByGID>""".strip()
-    response = session.post(f"{base_url}/configservice/getPolicyObjectByGID",
-                            data=gid_xml, headers=headers, verify=False)
-    if response.status_code == 200:
-        # print(f'Object:{response.text}\n')
-        root = ET.fromstring(response.text)
-        name = root.find(".//name")
-        return name.text
-    else:
-        return "No name found for this GID: {gid}"
-
-
-def PolicyRules(policy):
-    rules = []
-    root = ET.fromstring(policy)
-    for rule in root.findall('.//deviceAccessRuleFirewallPolicy'):
-        rule_id = rule.find('orderId').text
-        sources = []
-        destinations = []
-        services = []
-        for s in rule.findall('.//sources/networkObjectGIDs/gid'):
-            name = getNameByGID(s.text)
-            sources.append(name)
-        for s in rule.findall('.//destinations/networkObjectGIDs/gid'):
-            name = getNameByGID(s.text)
-            destinations.append(name)
-        for s in rule.findall('.//services/serviceObjectGIDs/gid'):
-            name = getNameByGID(s.text)
-            services.append(extractPorts(s.text))
-        services = list(set(val for s in services for val in s))
-        for s in rule.findall('.//services/serviceParameters'):
-            # protocol = s.find("protocol").text
-            port_elem = s.find(".//destinationPort/port")
-            if port_elem is not None:
-                services.append(port_elem.text)
-            # port_ref = s.find(".//destinationPort/portRefGID")
-            # if port_elem is not None:
-            #     print(f"Service: {protocol}, Port: {port_elem.text}")
-            # elif port_elem is not None:
-            #     print(f"Service: {protocol}, Port: {port_ref.text}")
-        rule_obj = Rule(
-            rule_number=rule_id,
-            source_objects=sources,
-            destination_objects=destinations,
-            destination_services=services
-        )
-        #     print("print this rule")
-        #     print(ET.tostring(rule, encoding='unicode'))
-        rules.append(rule_obj)
-    return rules
-
-
-def extractPorts(gid):
-    gid_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<n:getPolicyObjectByGID xmlns:n="csm">
-    <protVersion>1.0</protVersion>
-    <reqId>123456</reqId>
-    <gid>{gid}</gid>
-</n:getPolicyObjectByGID>""".strip()
+def parse_xml(text):
+    if '<!DOCTYPE' in text.upper() or '<!ENTITY' in text.upper():
+        raise ValidationError('XML entities are not supported')
     try:
-        response = session.post(f"{base_url}/configservice/getPolicyObjectByGID",
-                                data=gid_xml, headers=headers, verify=False)
-        if response.status_code != 200:
-            print("response Failed")
-            return set()
-        root = ET.fromstring(response.text)
-    except Exception:
-        print("exception Failed")
-        return set()
-    all_ports = set()
-    obj = root.find("policyObject")
-    if obj is None:
-        return all_ports
-    is_group = (obj.find(".//isGroup").text == "true"
-                if obj.find(".//isGroup") is not None else False)
-    if is_group:
-        for ref_gid in obj.findall(".//refGIDs/gid"):
-            all_ports.update(extractPorts(ref_gid.text))
-    # 2. חילוץ פורטים מאובייקט שירות (servicePolicyObject) [9, 10]
-    obj = obj.find("servicePolicyObject")
-    if obj is None:
-        return all_ports
-    for params in obj.findall(".//serviceParameters"):
-        dest_port = params.find("destinationPort")
-        if dest_port is not None:
-            # פורט ישיר (Literal Port) [9]
-            port_val = dest_port.find("port")
-            if port_val is not None:
-                all_ports.add(port_val.text)
-            # הפניה לרשימת פורטים (portRefGID) - רקורסיה [9, 10]
-            port_ref = dest_port.find("portRefGID")
-            if port_ref is not None:
-                all_ports.update(extractPorts(port_ref.text))
-    # 3. חילוץ מערכים של רשימת פורטים (portListPolicyObject) [11, 12]
-    # obj = obj.find("portListPolicyObject")
-    # המקורות מציינים שפורטים נמצאים תחת startPort ו-endPort [11, 12]
-    # for port_entry in obj.findall("port"):
-    #     start = port_entry.find(".//startPort/portNum")
-    #     end = port_entry.find(".//endPort/portNum")
-    #     if start is not None and end is not None:
-    #         val = start.text if start.text == end.text else f"{start.text}-{end.text}"
-    #         all_ports.add(val)
-    return all_ports
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        raise ValidationError('Invalid CSM XML') from None
+    for node in root.iter():
+        node.tag = node.tag.rsplit('}', 1)[-1]
+    if root.find('.//error') is not None:
+        raise APIError('CSM returned an application error')
+    return root
 
 
-def logout():
-    logout_payload = f"""<?xml version="1.0" encoding="UTF-8"?>
-<csm:logoutRequest xmlns:csm="csm">
-    <protVersion>1.0</protVersion>
-    <reqId>145</reqId>
-</csm:logoutRequest>"""
-    headers = {'Content-Type': 'text/xml'}
-    try:
-        logoutresponse = session.post(f"{base_url}/logout", data=logout_payload,
-                                      headers=headers, verify=False)
-        if logoutresponse.status_code == 200:
-            print("logout success")
-    except Exception as e:
-        print(f"Error:{e}")
+def required(node, path):
+    value = node.findtext(path)
+    if value is None or not value.strip():
+        raise ValidationError('Missing CSM field: ' + path)
+    return value.strip()
 
 
-# print(extractPorts(gid_number))
-# print(getPolicyList(gid_number))
-# name = getNameByGID(gid_number)
-# print("\n----------------- GID Name -----------------")
-# print(name)
-# list = getPolicyList(gid, login(csm_username, csm_password))
-# print("\n----------------- Policy List -----------------")
-# print(list)
-# print(getGIDByName(Device))
-# logout()
-# policy = getPolicy(policy_name)
-# print(PolicyRules(policy))
-# logout()
+class CSMClient(Transport):
+    def __init__(self, base_url, **kwargs):
+        super().__init__(base_url, **kwargs)
+        self.cookie, self.cache = None, {}
+
+    def call(self, path, root_name, fields=None):
+        root = ET.Element('{' + 'csm' + '}' + root_name)
+        for key, value in {'protVersion': '1.0', 'reqId': '1', **(fields or {})}.items():
+            ET.SubElement(root, key).text = str(value)
+        headers = {'Content-Type': 'text/xml'}
+        if self.cookie:
+            headers['Cookie'] = 'asCookie=' + self.cookie
+        response = self.request('POST', path, data=ET.tostring(root, encoding='utf-8'), headers=headers)
+        return response, parse_xml(response.text)
+
+    def login(self, username, password):
+        response, _ = self.call('/login', 'loginRequest', {'username': username, 'password': password})
+        self.cookie = response.cookies.get('asCookie')
+        if not self.cookie:
+            raise APIError('CSM login did not return a session cookie')
+        self.cache.clear()
+
+    def logout(self):
+        if self.cookie:
+            try:
+                self.call('/logout', 'logoutRequest')
+            finally:
+                self.cookie = None
+                self.cache.clear()
+
+    def query(self, endpoint, root, fields):
+        if not self.cookie:
+            raise APIError('CSM login required')
+        return self.call('/configservice/' + endpoint, root, fields)[1]
+
+    def getGIDByName(self, name):
+        return required(self.query('getDeviceConfigByName', 'deviceConfigByNameRequest', {'name': name}), './/gid')
+
+    def getPolicyList(self, gid):
+        return ET.tostring(self.query('getPolicyListByDeviceGID', 'policyListByDeviceGIDRequest', {'gid': gid}), encoding='unicode')
+
+    def object(self, gid):
+        if gid not in self.cache:
+            root = self.query('getPolicyObjectByGID', 'getPolicyObjectByGID', {'gid': gid})
+            if root.find('overrideDetails') is not None:
+                raise ValidationError('CSM device overrides require explicit resolution')
+            candidates = [n for n in root.findall('./policyObject/*') if n.findtext('gid') == gid]
+            if len(candidates) != 1:
+                raise ValidationError('Unresolved CSM object')
+            self.cache[gid] = candidates[0]
+        return self.cache[gid]
+
+    def resolve(self, gid, kind, stack=()):
+        if gid in stack:
+            raise ValidationError('Cyclic CSM object group')
+        obj = self.object(gid)
+        expected = 'networkPolicyObject' if kind == 'network' else 'servicePolicyObject'
+        if obj.tag != expected:
+            raise ValidationError('Unexpected CSM object type')
+        values = set()
+        for ref in obj.findall('./refGIDs/gid'):
+            values.update(self.resolve(required(ref, '.'), kind, stack + (gid,)))
+        if kind == 'network':
+            if obj.find('fqdnData') is not None:
+                raise ValidationError('FQDN requires runtime resolution')
+            literals = [n.text for key in ('ipv4Data', 'ipData') for n in obj.findall(key)]
+            values.update(networks(literals))
+        else:
+            for param in obj.findall('serviceParameters'):
+                values.update(self.parameter(param, stack + (gid,)))
+        if not values:
+            raise ValidationError('Empty or unsupported CSM object')
+        return frozenset(values)
+
+    def port_list(self, gid, stack=()):
+        if gid in stack:
+            raise ValidationError('Cyclic CSM port list')
+        obj = self.object(gid)
+        if obj.tag != 'portListPolicyObject':
+            raise ValidationError('Expected CSM port list')
+        result = []
+        for ref in obj.findall('./refGIDs/gid'):
+            result.extend(self.port_list(required(ref, '.'), stack + (gid,)))
+        starts, ends = obj.findall('startPort'), obj.findall('endPort')
+        if len(starts) != len(ends):
+            raise ValidationError('Incomplete CSM port range')
+        for a, b in zip(starts, ends):
+            result.append(required(a, 'portNum') + '-' + required(b, 'portNum'))
+        if not result:
+            raise ValidationError('Empty CSM port list')
+        return result
+
+    def parameter(self, param, stack=()):
+        if param.find('sourcePort') is not None or (param.findtext('icmpMessage') or '').strip():
+            raise ValidationError('Unsupported CSM source port or ICMP constraint')
+        protocol = required(param, 'protocol')
+        dest = param.find('destinationPort')
+        if dest is None:
+            return service(protocol)
+        direct = dest.findtext('port')
+        ref = dest.findtext('portRefGID') or dest.findtext('portRef')
+        if (direct is None) == (ref is None):
+            raise ValidationError('Invalid CSM destination port')
+        return set().union(*(service(protocol, port) for port in
+                               ([direct] if direct is not None else self.port_list(ref, stack))))
+
+    def getPolicy(self, name):
+        fields = {'name': name, 'policyType': 'DeviceAccessRuleFirewallPolicy'}
+        combined = ET.Element('policyConfigDeviceResponse')
+        rows, total, index, seen = 0, None, 0, set()
+        self.cache.clear()
+        while True:
+            root = self.query('getPolicyConfigByName', 'policyConfigByNameRequest', fields)
+            if root.tag != 'policyConfigDeviceResponse' or root.find('policy') is None:
+                raise ValidationError('Invalid CSM policy response')
+            if root.find('overrideDetails') is not None:
+                raise ValidationError('CSM device overrides require explicit resolution')
+            for obj in root.findall('./policyObject/*'):
+                gid = required(obj, 'gid')
+                if gid in self.cache and ET.tostring(obj) != ET.tostring(self.cache[gid]):
+                    raise ValidationError('CSM object changed during pagination')
+                self.cache[gid] = obj
+            rules = root.findall('./policy/deviceAccessRuleFirewallPolicy')
+            for rule in rules:
+                ident = required(rule, 'orderId')
+                if ident in seen:
+                    raise ValidationError('Repeated CSM rule')
+                seen.add(ident)
+                combined.append(rule)
+            rows += len(rules)
+            end, count = root.findtext('endIndex'), root.findtext('totalCount')
+            if end is None and count is None:
+                if total is not None and rows != total:
+                    raise ValidationError('Incomplete CSM pagination')
+                return ET.tostring(combined, encoding='unicode')
+            try:
+                end, count = int(end), int(count)
+            except (ValueError, TypeError):
+                raise ValidationError('Invalid CSM pagination metadata') from None
+            if end <= index or end != rows or count < end or (total is not None and count != total):
+                raise ValidationError('Inconsistent CSM pagination')
+            total, index = count, end
+            fields['startIndex'] = end
+            if rows == total:
+                return ET.tostring(combined, encoding='unicode')
+
+    def PolicyRules(self, policy):
+        root = parse_xml(policy)
+        if root.tag != 'policyConfigDeviceResponse':
+            raise ValidationError('Invalid CSM policy snapshot')
+        if root.find('endIndex') is not None or root.find('totalCount') is not None:
+            raise ValidationError('Parse the complete CSM policy, not an individual page')
+        for obj in root.findall('./policyObject/*'):
+            self.cache[required(obj, 'gid')] = obj
+        result = []
+        rules = root.findall('./deviceAccessRuleFirewallPolicy') + root.findall('./policy/deviceAccessRuleFirewallPolicy')
+        for raw in rules:
+            objects, issues = {}, []
+            def field(name):
+                container = raw.find(name)
+                if container is None:
+                    raise ValidationError('Missing CSM network container')
+                for child in container:
+                    if child.tag not in ('networkObjectGIDs', 'ipv4Data', 'ipData', 'interfaceRoleObjectGIDs'):
+                        raise ValidationError('Unsupported CSM network constraint')
+                names = []
+                for ref in container.findall('./networkObjectGIDs/gid'):
+                    gid = required(ref, '.')
+                    obj = self.object(gid)
+                    label = required(obj, 'name')
+                    names.append(label)
+                    resolved = sorted(self.resolve(gid, 'network'))
+                    if label in objects and objects[label] != resolved:
+                        raise ValidationError('Conflicting CSM object names')
+                    objects[label] = resolved
+                for i, literal in enumerate(container.findall('ipv4Data') + container.findall('ipData')):
+                    label = f'@{name}:{i}'
+                    names.append(label)
+                    objects[label] = sorted(networks([literal.text]))
+                if not names:
+                    names = ['@any']
+                    objects['@any'] = ['0.0.0.0/0', '::/0']
+                return names
+            for key in ('interfaceRoleObjectGIDs', 'users', 'timeRangeObjectId', 'timeRangeObjectGID', 'securityGroups'):
+                node = raw.find(key)
+                if node is not None and (len(node) or (node.text or '').strip()):
+                    issues.append('Unsupported CSM constraint: ' + key)
+            for path in ('sources/interfaceRoleObjectGIDs/gid', 'destinations/interfaceRoleObjectGIDs/gid'):
+                if raw.find(path) is not None:
+                    issues.append('Unsupported CSM interface constraint')
+            if raw.findtext('iosOptions', 'none').lower() != 'none':
+                issues.append('Unsupported CSM IOS option')
+            supported = {'gid', 'name', 'lastUpdateTime', 'updatedByUser', 'lastCommitTime',
+                         'activityName', 'type', 'orderId', 'isMandatoryAggregation',
+                         'configState', 'isEnabled', 'direction', 'permit', 'sources',
+                         'destinations', 'services', 'logOptions', 'iosOptions', 'comment',
+                         'interfaceRoleObjectGIDs'}
+            for child in raw:
+                if child.tag not in supported and (len(child) or (child.text or '').strip()):
+                    issues.append('Unreviewed CSM rule field: ' + child.tag)
+            permit, enabled = required(raw, 'permit'), required(raw, 'isEnabled')
+            if permit not in ('true', 'false') or enabled not in ('true', 'false'):
+                raise ValidationError('Invalid CSM boolean')
+            svc = set()
+            container = raw.find('services')
+            if container is None:
+                raise ValidationError('Missing CSM services')
+            if any(child.tag not in ('serviceObjectGIDs', 'serviceParameters') for child in container):
+                raise ValidationError('Unsupported CSM service constraint')
+            for ref in container.findall('./serviceObjectGIDs/gid'):
+                svc.update(self.resolve(required(ref, '.'), 'service'))
+            for param in container.findall('serviceParameters'):
+                svc.update(self.parameter(param))
+            if not svc:
+                svc = service('ip')
+            result.append(Rule(required(raw, 'orderId'), field('sources'), field('destinations'),
+                               sorted(svc), 'ALLOW' if permit == 'true' else 'DROP',
+                               enabled == 'true', objects, issues))
+        return result
+
+    def policy_rules(self, name):
+        return self.PolicyRules(self.getPolicy(name))

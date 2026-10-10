@@ -55,3 +55,22 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(compare_rules([self.rule()], [self.rule(action='DROP')])['status'], 'FAIL')
         self.assertEqual(compare_rules([self.rule()], [self.rule(enabled=False)])['status'], 'FAIL')
         self.assertEqual(compare_rules([self.rule(), self.rule('443')], [self.rule('443'), self.rule()])['status'], 'PASS')
+
+    def test_cli_exit_codes(self):
+        import contextlib
+        import io
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from compare import main
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder:
+            a, b = Path(folder) / 'a.json', Path(folder) / 'b.json'
+            raw = {'rule_number': '1', 'source_objects': ['a'], 'destination_objects': ['b'], 'destination_services': [['6', 80, 80]]}
+            a.write_text(json.dumps([raw]), encoding='utf-8')
+            for services, code, status in (([['6', 80, 80]], 0, 'PASS'), ([['17', 80, 80]], 1, 'FAIL'), (None, 2, 'INDETERMINATE')):
+                b.write_text(json.dumps([{**raw, 'destination_services': services}]), encoding='utf-8')
+                output = io.StringIO()
+                with patch('sys.argv', ['compare.py', str(a), str(b)]), contextlib.redirect_stdout(output):
+                    self.assertEqual(main(), code)
+                self.assertEqual(json.loads(output.getvalue())['status'], status)
