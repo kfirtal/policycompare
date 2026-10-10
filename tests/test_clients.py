@@ -189,3 +189,13 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(APIError):
             client.get('/policy/accesspolicies')
         self.assertEqual(session.request.call_count, 5)
+
+    def test_cross_vendor_value_equivalence(self):
+        from compare import compare_rules
+        source, _ = csm()
+        source.cache['host'] = parse_xml('<networkPolicyObject><name>CSM-name</name><ipv4Data>192.0.2.1</ipv4Data></networkPolicyObject>')
+        raw_xml = xml_rule().replace('<sources/>', '<sources><networkObjectGIDs><gid>host</gid></networkObjectGIDs></sources>')
+        source_rules = source.PolicyRules('<policyConfigDeviceResponse><policy>' + raw_xml + '</policy></policyConfigDeviceResponse>')
+        raw = {'id': 'r', 'action': 'ALLOW', 'enabled': True, 'sourceNetworks': {'objects': [{'id': 'host', 'name': 'FMC-name', 'type': 'Host'}]}, 'destinationPorts': {'literals': [{'type': 'PortLiteral', 'protocol': '6', 'port': '80'}]}}
+        target, _ = fmc(response({'items': [raw], 'paging': {'count': 1}}), response({'id': 'host', 'type': 'Host', 'value': '192.0.2.1/32'}))
+        self.assertEqual(compare_rules(source_rules, target.policy_rules('p'))['status'], 'PASS')

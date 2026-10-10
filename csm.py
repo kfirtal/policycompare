@@ -86,6 +86,11 @@ class CSMClient(Transport):
         expected = 'networkPolicyObject' if kind == 'network' else 'servicePolicyObject'
         if obj.tag != expected:
             raise ValidationError('Unexpected CSM object type')
+        allowed = {'gid', 'name', 'lastUpdateTime', 'parentGID', 'type', 'comment',
+                   'nodeGID', 'isProperty', 'subType', 'isGroup', 'refGIDs',
+                   'ipv4Data', 'ipData', 'fqdnData', 'serviceParameters'}
+        if any(child.tag not in allowed and (len(child) or (child.text or '').strip()) for child in obj):
+            raise ValidationError('Unreviewed CSM object field')
         values = set()
         for ref in obj.findall('./refGIDs/gid'):
             values.update(self.resolve(required(ref, '.'), kind, stack + (gid,)))
@@ -123,6 +128,8 @@ class CSMClient(Transport):
         if param.find('sourcePort') is not None or (param.findtext('icmpMessage') or '').strip():
             raise ValidationError('Unsupported CSM source port or ICMP constraint')
         protocol = required(param, 'protocol')
+        if any(child.tag not in ('protocol', 'destinationPort', 'sourcePort', 'icmpMessage') for child in param):
+            raise ValidationError('Unreviewed CSM service field')
         dest = param.find('destinationPort')
         if dest is None:
             return service(protocol)
@@ -150,6 +157,8 @@ class CSMClient(Transport):
                     raise ValidationError('CSM object changed during pagination')
                 self.cache[gid] = obj
             rules = root.findall('./policy/deviceAccessRuleFirewallPolicy')
+            if any(child.tag != 'deviceAccessRuleFirewallPolicy' for child in root.find('policy')):
+                raise ValidationError('Unreviewed CSM policy row')
             for rule in rules:
                 ident = required(rule, 'orderId')
                 if ident in seen:

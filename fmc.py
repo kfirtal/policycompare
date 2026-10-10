@@ -103,6 +103,8 @@ class FMCClient(Transport):
 
     @staticmethod
     def literal(obj, kind):
+        if obj.get('sourcePort') or obj.get('sourcePorts'):
+            raise ValidationError('Unsupported FMC source port constraint')
         if kind == 'network':
             if obj.get('type') not in ('Host', 'Network', 'Range') or 'value' not in obj:
                 raise ValidationError('Unsupported FMC network literal')
