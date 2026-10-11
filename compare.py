@@ -1,12 +1,13 @@
 """Offline comparison; imports never connect to Cisco."""
 import argparse
 import json
-from rule import Rule
+from snapshots import load_snapshot
 from normalization import services, networks
 from errors import ValidationError, APIError
 
 
 def signature(rule):
+    """Return an order-independent key, only after validating the rule."""
     if rule.issues:
         raise ValidationError('; '.join(rule.issues))
     if rule.action not in ('ALLOW', 'DROP') or not isinstance(rule.enabled, bool):
@@ -14,8 +15,15 @@ def signature(rule):
     for values in (rule.source_objects, rule.destination_objects, rule.destination_services):
         if not isinstance(values, (list, tuple, set, frozenset)) or any(v is None for v in values):
             raise ValidationError('Invalid rule field')
-    if rule.object_values and any(not values for values in rule.object_values.values()):
-        raise ValidationError('Empty resolved object')
+    if not isinstance(rule.object_values, dict):
+        raise ValidationError('Resolved objects must be a mapping')
+    for name, values in rule.object_values.items():
+        if not isinstance(name, str) or not name:
+            raise ValidationError('Invalid resolved object name')
+        if not isinstance(values, (list, tuple, set, frozenset)) or not values:
+            raise ValidationError('Resolved object must contain a collection of network values')
+        if any(not isinstance(value, str) or not value.strip() for value in values):
+            raise ValidationError('Invalid resolved network value')
     def net(values):
         if rule.object_values:
             try:
@@ -33,6 +41,7 @@ def find_gaps(csm_list, fmc_list):
 
 
 def compare_rules(source, target, allow_empty=False):
+    """Report both directions; invalid input always prevents a PASS."""
     source, target = list(source), list(target)
     errors = []
     if not allow_empty and (not source or not target):
@@ -86,13 +95,9 @@ def main():
     parser.add_argument('--allow-empty', action='store_true')
     args = parser.parse_args()
     try:
-        def read(path):
-            with open(path, encoding='utf-8') as f:
-                data = json.load(f)
-            for item in data:
-                item['destination_services'] = [tuple(s) if isinstance(s, list) else s for s in item['destination_services']]
-            return [Rule(**item) for item in data]
-        report = compare_rules(read(args.source), read(args.target), args.allow_empty)
+        source = load_snapshot(args.source)
+        target = load_snapshot(args.target)
+        report = compare_rules(source, target, args.allow_empty)
     except (OSError, ValueError, TypeError, KeyError):
         report = dict(status='INDETERMINATE', errors=['Invalid or unreadable snapshot'])
     print(json.dumps(report, indent=2))

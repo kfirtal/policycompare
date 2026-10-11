@@ -97,6 +97,10 @@ class ClientTests(unittest.TestCase):
         client, _ = fmc(response({'items': [raw], 'paging': {'count': 1}}))
         rules = client.policy_rules('policy')
         self.assertEqual(rules[0].destination_services, [('6', 80, 80)])
+        # The network inventory must never contain protocol/port service tuples.
+        self.assertTrue(all(isinstance(value, str)
+                            for values in rules[0].object_values.values()
+                            for value in values))
 
     def test_csm_pagination(self):
         client, session = csm(response(text='<policyConfigDeviceResponse><policy>' + xml_rule() + '</policy><endIndex>1</endIndex><totalCount>2</totalCount></policyConfigDeviceResponse>'), response(text='<policyConfigDeviceResponse><policy>' + xml_rule('2') + '</policy></policyConfigDeviceResponse>'))

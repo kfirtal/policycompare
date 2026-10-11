@@ -1,3 +1,4 @@
+"""Canonical representations used to compare values, rather than spelling."""
 import ipaddress
 from errors import ValidationError
 
@@ -44,11 +45,26 @@ def service(protocol, port=None):
 
 
 def services(values):
+    """Validate service tuples, then merge ranges within each protocol.
+
+    A normalized tuple is (protocol, first_port, last_port). Legacy port-only
+    strings remain separate because they do not tell us the protocol.
+    """
     result = set()
     for value in values:
-        if isinstance(value, tuple) and len(value) == 3:
+        if isinstance(value, tuple):
+            if len(value) != 3:
+                raise ValidationError('Service tuple must contain protocol and two ports')
             p, lo, hi = value
-            result.update(service(p, f'{lo}-{hi}') if p != 'any' else service(p))
+            # bool is an int subclass, but True is not a valid port number.
+            if type(lo) is not int or type(hi) is not int or not 0 <= lo <= hi <= 65535:
+                raise ValidationError('Invalid normalized service range')
+            if str(p).lower() in ('any', 'ip'):
+                if (lo, hi) != (0, 65535):
+                    raise ValidationError('IP-any cannot carry a restricted port range')
+                result.update(service('ip'))
+            else:
+                result.update(service(p, f'{lo}-{hi}'))
         else:
             result.update(('legacy', lo, hi) for lo, hi in ports(value))
     if ('any', 0, 65535) in result:

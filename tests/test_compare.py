@@ -39,6 +39,31 @@ class ComparisonTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 service('tcp', value)
 
+    def test_invalid_service_tuples_cannot_pass(self):
+        invalid_services = [
+            ('any', 80, 80), ('ip', 1, 65535), ('6', -1, 80),
+            ('6', 80, 65536), ('6', 90, 80), ('6', True, 80),
+            ('6', '80', '80'), ('6', 80),
+        ]
+        for value in invalid_services:
+            rule = self.rule()
+            rule.destination_services = [value]
+            with self.subTest(value=value):
+                self.assertEqual(compare_rules([rule], [rule])['status'], 'INDETERMINATE')
+
+    def test_invalid_object_mappings_cannot_pass(self):
+        invalid_mappings = [
+            [], '', False, {'src': '192.0.2.1'}, {'src': []},
+            {'src': [None]}, {'src': ['']}, {None: ['192.0.2.1']},
+        ]
+        for value in invalid_mappings:
+            rule = self.rule(object_values=value)
+            with self.subTest(value=value):
+                self.assertEqual(compare_rules([rule], [rule])['status'], 'INDETERMINATE')
+
+    def test_any_aliases_are_equivalent(self):
+        self.assertEqual(services([('ip', 0, 65535)]), services([('any', 0, 65535)]))
+
     def test_network_equivalence(self):
         self.assertEqual(networks(['192.0.2.0/25', '192.0.2.128/25']), networks(['192.0.2.0/24']))
         self.assertEqual(networks(['192.0.2.1']), networks(['192.0.2.1/32']))

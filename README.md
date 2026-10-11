@@ -128,3 +128,20 @@ migration validation. Object caches do not persist between policy fetches.
 CSM starts pagination without a startIndex; subsequent requests reuse endIndex.
 The last page omits endIndex/totalCount. FMC uses offset/limit and collection
 paging.count. Both readers verify fetched totals before returning a policy.
+
+## הסבר על שלב האימות
+
+`snapshots.py` אחראי לטעינת קובצי JSON מקומיים. הוא בודק שהקובץ מכיל
+מערך חוקים, שהשדות הדרושים קיימים ושהמבנה שלהם תקין. שדות לא מוכרים
+נדחים כדי שלא נתעלם בטעות מתנאי חשוב בחוק.
+
+`compare.signature` בודק את משמעות הנתונים לפני יצירת מפתח ההשוואה.
+ערכי אובייקט חייבים להיות אוסף כתובות ורשתות, ולא מחרוזת בודדת.
+שירות מנורמל מכיל פרוטוקול ושני מספרי פורט שלמים בטווח תקין.
+שירות מסוג `any` חייב לכסות את הטווח המלא; טווח מצומצם אינו תקין.
+נתון פגום מונע PASS גם כאשר אותו נתון מופיע בשני הצדדים.
+
+תנאי לסיום הפרויקט הוא אימות מתועד מול שרתי CSM ו־FMC במעבדה,
+לאחר אישור מפורש להתחבר אליהם. נבדוק התאמה מלאה, פערים מכוונים,
+קבוצות מקוננות, דפדוף בתוצאות וכשלי תקשורת והרשאה. הבדיקות המקומיות
+אינן מחליפות שלב זה. הכלי עצמו יבצע קריאה בלבד.

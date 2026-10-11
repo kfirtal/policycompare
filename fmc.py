@@ -127,15 +127,17 @@ class FMCClient(Transport):
                     resolved = self.resolve(ref, kind)
                     label = ref.get('name', ref['id'])
                     names.append(label)
-                    if label in objects and objects[label] != sorted(resolved):
-                        raise ValidationError('Conflicting FMC object names')
-                    objects[label] = sorted(resolved)
+                    if kind == 'network':
+                        if label in objects and objects[label] != sorted(resolved):
+                            raise ValidationError('Conflicting FMC object names')
+                        objects[label] = sorted(resolved)
                     values.update(resolved)
                 for i, lit in enumerate(container.get('literals', [])):
                     resolved = self.literal(lit, kind)
                     label = f'@{name}:{i}'
                     names.append(label)
-                    objects[label] = sorted(resolved)
+                    if kind == 'network':
+                        objects[label] = sorted(resolved)
                     values.update(resolved)
                 if not names:
                     if kind == 'network':

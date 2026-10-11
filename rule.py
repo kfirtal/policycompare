@@ -8,7 +8,8 @@ class Rule:
         self.destination_services = destination_services
         self.action = action
         self.enabled = enabled
-        self.object_values = object_values or {}
+        # Only None means "not supplied"; malformed values must reach validation.
+        self.object_values = {} if object_values is None else object_values
         self.issues = tuple(issues)
 
     def __repr__(self):
