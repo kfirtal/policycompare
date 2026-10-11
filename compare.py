@@ -1,99 +1,170 @@
-"""Offline comparison; imports never connect to Cisco."""
+"""Two independent comparisons: rule fields, then referenced object values."""
 import argparse
 import json
+from pathlib import Path
+
+from errors import APIError, ValidationError
+from normalization import networks, services, ports
 from snapshots import load_snapshot
-from normalization import services, networks
-from errors import ValidationError, APIError
 
 
 def signature(rule):
-    """Return an order-independent key, only after validating the rule."""
+    """Only source names, destination names and destination protocol/ports."""
     if rule.issues:
         raise ValidationError('; '.join(rule.issues))
-    if rule.action not in ('ALLOW', 'DROP') or not isinstance(rule.enabled, bool):
-        raise ValidationError('Invalid action or enabled state')
-    for values in (rule.source_objects, rule.destination_objects, rule.destination_services):
-        if not isinstance(values, (list, tuple, set, frozenset)) or any(v is None for v in values):
-            raise ValidationError('Invalid rule field')
-    if not isinstance(rule.object_values, dict):
-        raise ValidationError('Resolved objects must be a mapping')
-    for name, values in rule.object_values.items():
-        if not isinstance(name, str) or not name:
-            raise ValidationError('Invalid resolved object name')
-        if not isinstance(values, (list, tuple, set, frozenset)) or not values:
-            raise ValidationError('Resolved object must contain a collection of network values')
-        if any(not isinstance(value, str) or not value.strip() for value in values):
-            raise ValidationError('Invalid resolved network value')
-    def net(values):
-        if rule.object_values:
-            try:
-                return networks(v for name in values for v in rule.object_values[name])
-            except KeyError:
-                raise ValidationError('Unresolved network reference') from None
-        return frozenset(values)
-    return (rule.action, rule.enabled, net(rule.source_objects),
-            net(rule.destination_objects), services(rule.destination_services))
+    for names in (rule.source_objects, rule.destination_objects):
+        if not isinstance(names, (list, tuple, set, frozenset)):
+            raise ValidationError('Network object names must be a collection')
+        if any(not isinstance(name, str) or not name.strip() for name in names):
+            raise ValidationError('Invalid network object name')
+    if not isinstance(rule.destination_services, (list, tuple, set, frozenset)):
+        raise ValidationError('Destination services must be a collection')
+    if not rule.destination_services:
+        raise ValidationError('Destination services must explicitly describe Any or protocol/ports')
+    if any(not isinstance(value, tuple) for value in rule.destination_services):
+        raise ValidationError('Destination services require protocol and port ranges')
+    return (frozenset(rule.source_objects), frozenset(rule.destination_objects),
+            services(rule.destination_services))
 
 
 def find_gaps(csm_list, fmc_list):
-    signatures = {signature(r) for r in fmc_list}
-    return [r for r in csm_list if signature(r) not in signatures]
+    """Keep the original API: return CSM Rule instances absent from FMC."""
+    target = {signature(rule) for rule in fmc_list}
+    return [rule for rule in csm_list if signature(rule) not in target]
 
 
-def report_context(source, target):
-    """Expose counts and comparison limits without claiming full equivalence."""
-    warnings = ['Comparison covers supported access-rule fields; rule order is ignored.']
-    if any(not rule.object_values for rule in source + target):
-        warnings.append('Some rules compare network names only; object values are not verified for those rules.')
-    if any(isinstance(value, str) for rule in source + target for value in
-           (rule.destination_services if isinstance(rule.destination_services, (list, tuple, set, frozenset)) else [])):
-        warnings.append('Some services have no protocol; TCP/UDP identity is not verified for those services.')
-    return dict(summary={'source_rules': len(source), 'target_rules': len(target)}, warnings=warnings)
+def rule_detail(rule):
+    return dict(rule_number=rule.rule_number, sources=sorted(set(rule.source_objects)),
+                destinations=sorted(set(rule.destination_objects)),
+                services=sorted(services(rule.destination_services)))
 
 
 def compare_rules(source, target, allow_empty=False):
-    """Report both directions; invalid input always prevents a PASS."""
+    """Stage one intentionally never reads object values, action or enabled."""
     source, target = list(source), list(target)
-    errors = []
+    report = dict(status='INDETERMINATE', errors=[], missing=[], extra=[],
+                  summary={'source_rules': len(source), 'target_rules': len(target)},
+                  scope='Source object names, destination object names, destination protocol/ports. Order, action and enabled state are ignored.')
+    if not allow_empty and (not source or not target):
+        report['errors'].append('Empty policy requires explicit allow_empty')
+    for side, rules in (('source', source), ('target', target)):
+        for rule in rules:
+            try:
+                signature(rule)
+            except (ValidationError, TypeError, ValueError):
+                report['errors'].append(f'{side} rule {rule.rule_number}: incomplete or invalid comparison fields')
+    if report['errors']:
+        return report
+    report['missing'] = [rule_detail(rule) for rule in find_gaps(source, target)]
+    report['extra'] = [rule_detail(rule) for rule in find_gaps(target, source)]
+    report['status'] = 'FAIL' if report['missing'] or report['extra'] else 'PASS'
+    return report
+
+
+def normalized_object(record):
+    """Groups compare their expanded values; every named child is also audited."""
+    if not isinstance(record, dict):
+        raise ValidationError('Invalid referenced object record')
+    name, kind, values = record.get('name'), record.get('kind'), record.get('values')
+    if not isinstance(name, str) or not name.strip():
+        raise ValidationError('Invalid object name')
+    if not isinstance(values, (list, tuple, set, frozenset)) or not values:
+        raise ValidationError('Empty or malformed object values')
+    if kind == 'network':
+        if any(not isinstance(value, str) for value in values):
+            raise ValidationError('Invalid network values')
+        value = networks(values)
+    elif kind == 'service':
+        tuples = [tuple(item) if isinstance(item, list) else item for item in values]
+        if any(not isinstance(item, tuple) for item in tuples):
+            raise ValidationError('Service object requires protocol/ports')
+        value = services(tuples)
+    elif kind == 'port_list':
+        # CSM port-list objects have no protocol of their own.
+        if any(type(item) not in (str, int) or not str(item).strip() for item in values):
+            raise ValidationError('Invalid port-list value')
+        spans = [('6', lo, hi) for item in values for lo, hi in ports(item)]
+        value = frozenset((lo, hi) for _, lo, hi in services(spans))
+    else:
+        raise ValidationError('Unsupported referenced object kind')
+    return (kind, name), value
+
+
+def object_inventory(rules, side):
+    inventory, affected, errors = {}, {}, []
+    for rule in rules:
+        names = (rule.source_objects, rule.destination_objects, rule.service_objects)
+        if any(not isinstance(items, (list, tuple, set, frozenset))
+               or any(not isinstance(item, str) for item in items) for items in names):
+            errors.append(f'{side} rule {rule.rule_number}: invalid named references')
+            continue
+        if rule.object_issues:
+            errors.append(f'{side} rule {rule.rule_number}: referenced object resolution incomplete')
+        if rule.referenced_objects is None:
+            errors.append(f'{side} rule {rule.rule_number}: complete referenced-object inventory unavailable')
+            continue
+        if not isinstance(rule.referenced_objects, list):
+            errors.append(f'{side} rule {rule.rule_number}: invalid referenced-object inventory')
+            continue
+        keys = set()
+        for record in rule.referenced_objects:
+            try:
+                key, values = normalized_object(record)
+                keys.add(key)
+                if key in inventory and inventory[key] != values:
+                    raise ValidationError('Conflicting values for the same object name')
+                inventory[key] = values
+                affected.setdefault(key, [])
+                if rule.rule_number not in affected[key]:
+                    affected[key].append(rule.rule_number)
+            except (ValidationError, TypeError, ValueError):
+                errors.append(f'{side} rule {rule.rule_number}: invalid or conflicting object values')
+        # Check coverage of direct named references. Literals and omitted Any
+        # have reserved @ markers and are not real objects to match by name.
+        for name in list(rule.source_objects) + list(rule.destination_objects):
+            if not name.startswith('@') and ('network', name) not in keys:
+                errors.append(f'{side} rule {rule.rule_number}: network object missing from inventory')
+        for name in rule.service_objects:
+            if ('service', name) not in keys:
+                errors.append(f'{side} rule {rule.rule_number}: service object missing from inventory')
+    return inventory, affected, errors
+
+
+def compare_objects(source, target, allow_empty=False):
+    """Stage two matches names and kinds, independently of rule signatures."""
+    source, target = list(source), list(target)
+    a, source_rules, errors_a = object_inventory(source, 'source')
+    b, target_rules, errors_b = object_inventory(target, 'target')
+    errors = errors_a + errors_b
     if not allow_empty and (not source or not target):
         errors.append('Empty policy requires explicit allow_empty')
-    for side, rules in [('source', source), ('target', target)]:
-        for r in rules:
-            try:
-                signature(r)
-            except (ValidationError, TypeError, ValueError) as exc:
-                errors.append(f'{side} rule {r.rule_number}: {exc}')
-    if errors:
-        return dict(status='INDETERMINATE', errors=errors, missing=[], extra=[], changed_objects=[],
-                    **report_context(source, target))
-    missing, extra = find_gaps(source, target), find_gaps(target, source)
-    changed = []
-    def inventory(rules):
-        result = {}
-        for r in rules:
-            for name in set(r.source_objects) | set(r.destination_objects):
-                if name in r.object_values:
-                    result.setdefault(name, []).append((r.rule_number, networks(r.object_values[name])))
-        return result
-    a, b = inventory(source), inventory(target)
-    for name in sorted(a.keys() & b.keys()):
-        if {v for _, v in a[name]} != {v for _, v in b[name]}:
-            changed.append(dict(name=name, source_values=sorted(set().union(*(v for _, v in a[name]))),
-                                target_values=sorted(set().union(*(v for _, v in b[name]))),
-                                source_rules=[i for i, _ in a[name]], target_rules=[i for i, _ in b[name]]))
-    def detail(r):
-        return dict(rule_number=r.rule_number, action=r.action, enabled=r.enabled,
-                    sources=list(r.source_objects), destinations=list(r.destination_objects),
-                    services=sorted(services(r.destination_services)),
-                    resolved_sources=sorted(signature(r)[2]) if r.object_values else None,
-                    resolved_destinations=sorted(signature(r)[3]) if r.object_values else None)
-    return dict(status='FAIL' if missing or extra else 'PASS', errors=[],
-                missing=[detail(r) for r in missing], extra=[detail(r) for r in extra], changed_objects=changed,
-                **report_context(source, target))
+    def detail(key):
+        kind, name = key
+        return dict(kind=kind, name=name,
+                    source_values=sorted(a[key]) if key in a else None,
+                    target_values=sorted(b[key]) if key in b else None,
+                    source_rules=source_rules.get(key, []), target_rules=target_rules.get(key, []))
+    missing = [detail(key) for key in sorted(a.keys() - b.keys())]
+    extra = [detail(key) for key in sorted(b.keys() - a.keys())]
+    changed = [detail(key) for key in sorted(a.keys() & b.keys()) if a[key] != b[key]]
+    status = 'INDETERMINATE' if errors else 'FAIL' if missing or extra or changed else 'PASS'
+    return dict(status=status, errors=errors, missing=missing, extra=extra, changed=changed,
+                summary={'source_objects': len(a), 'target_objects': len(b)},
+                scope='Referenced network/service objects and groups matched by kind and exact name; includes nested members. Group values are expanded.')
+
+
+def compare_all(source, target, allow_empty=False):
+    """Return two distinct reports and a conservative overall status."""
+    source, target = list(source), list(target)
+    rules = compare_rules(source, target, allow_empty)
+    objects = compare_objects(source, target, allow_empty)
+    statuses = (rules['status'], objects['status'])
+    status = 'INDETERMINATE' if 'INDETERMINATE' in statuses else 'FAIL' if 'FAIL' in statuses else 'PASS'
+    return dict(status=status, rules_report=rules, objects_report=objects)
 
 
 def compare_policies(csm_client, csm_name, fmc_client, fmc_name):
-    """Use only with explicitly authorized, already authenticated clients."""
+    """Requires explicit authorization and already authenticated clients."""
     stage = 'csm_policy_read'
     try:
         source = csm_client.policy_rules(csm_name)
@@ -102,30 +173,75 @@ def compare_policies(csm_client, csm_name, fmc_client, fmc_name):
         stage = 'fmc_policy_read'
         target = fmc_client.policy_rules(policy_id)
         stage = 'comparison'
-        return compare_rules(source, target)
+        return compare_all(source, target)
     except (APIError, ValidationError, KeyError, TypeError, ValueError) as exc:
-        # Do not copy exception text: an adapter or HTTP library may include
-        # response bodies, URLs or credentials. Stage/category are safe context.
-        category = 'api_error' if isinstance(exc, APIError) else 'invalid_response'
-        return dict(status='INDETERMINATE', errors=['Policy retrieval or parsing failed'],
-                    error_details=[dict(stage=stage, category=category)],
-                    missing=[], extra=[], changed_objects=[])
+        detail = dict(stage=stage, category='api_error' if isinstance(exc, APIError) else 'invalid_response')
+        failure = dict(status='INDETERMINATE', errors=['Policy retrieval or parsing failed'], error_details=[detail],
+                       missing=[], extra=[])
+        return dict(status='INDETERMINATE', error_details=[detail],
+                    rules_report=dict(failure), objects_report={**failure, 'changed': []})
+
+
+def save_reports(result, directory):
+    """Write separate JSON/text reports. Refuse to overwrite an earlier run."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    paths = [directory / (name + suffix) for name in ('rules_report', 'objects_report') for suffix in ('.json', '.txt')]
+    if any(path.exists() for path in paths):
+        raise ValidationError('Report files already exist; choose a new output directory')
+    for name in ('rules_report', 'objects_report'):
+        report = result[name]
+        with (directory / (name + '.json')).open('x', encoding='utf-8') as stream:
+            json.dump(report, stream, ensure_ascii=False, indent=2)
+        with (directory / (name + '.txt')).open('x', encoding='utf-8') as stream:
+            stream.write(format_report(name, report))
+
+
+def format_report(name, report):
+    """Human-readable companion to the machine-readable JSON report."""
+    title = 'דוח השוואת חוקים' if name == 'rules_report' else 'דוח השוואת אובייקטים'
+    lines = [title, 'תוצאה: ' + report['status'], report.get('scope', '')]
+    for key, value in report.get('summary', {}).items():
+        lines.append(f'{key}: {value}')
+    lines.extend('שגיאה: ' + error for error in report['errors'])
+    for category, heading in (('missing', 'קיימים ב-CSM וחסרים ב-FMC'),
+                              ('extra', 'קיימים ב-FMC וחסרים ב-CSM'),
+                              ('changed', 'אובייקטים בעלי ערכים שונים')):
+        if category not in report:
+            continue
+        entries = report[category]
+        lines.extend(['', f'{heading}: {len(entries)}'])
+        for entry in entries:
+            if name == 'rules_report':
+                lines.extend([f"  חוק: {entry['rule_number']}",
+                              '  Source Objects: ' + ', '.join(entry['sources']),
+                              '  Destination Objects: ' + ', '.join(entry['destinations']),
+                              '  Destination Services: ' + json.dumps(entry['services'])])
+            else:
+                lines.extend([f"  {entry['name']} ({entry['kind']})",
+                              '  CSM values: ' + json.dumps(entry['source_values'], ensure_ascii=False),
+                              '  FMC values: ' + json.dumps(entry['target_values'], ensure_ascii=False),
+                              '  CSM rules: ' + json.dumps(entry['source_rules'], ensure_ascii=False),
+                              '  FMC rules: ' + json.dumps(entry['target_rules'], ensure_ascii=False)])
+    return '\n'.join(lines) + '\n'
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Compare offline normalized policy JSON files')
+    parser = argparse.ArgumentParser(description='Compare offline policies: separate rule and object reports')
     parser.add_argument('source')
     parser.add_argument('target')
     parser.add_argument('--allow-empty', action='store_true')
+    parser.add_argument('--output-dir', help='New report directory; reports contain internal infrastructure data')
     args = parser.parse_args()
     try:
-        source = load_snapshot(args.source)
-        target = load_snapshot(args.target)
-        report = compare_rules(source, target, args.allow_empty)
+        result = compare_all(load_snapshot(args.source), load_snapshot(args.target), args.allow_empty)
+        if args.output_dir:
+            save_reports(result, args.output_dir)
     except (OSError, ValueError, TypeError, KeyError):
-        report = dict(status='INDETERMINATE', errors=['Invalid or unreadable snapshot'])
-    print(json.dumps(report, indent=2))
-    return {'PASS': 0, 'FAIL': 1, 'INDETERMINATE': 2}[report['status']]
+        failure = dict(status='INDETERMINATE', errors=['Invalid snapshot or report output failure'], missing=[], extra=[])
+        result = dict(status='INDETERMINATE', rules_report=dict(failure), objects_report={**failure, 'changed': []})
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return {'PASS': 0, 'FAIL': 1, 'INDETERMINATE': 2}[result['status']]
 
 
 if __name__ == '__main__':

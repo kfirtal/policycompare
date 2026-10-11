@@ -4,7 +4,7 @@ from urllib.parse import quote
 from transport import Transport
 from errors import APIError, ValidationError
 from normalization import networks, service
-from rule import Rule
+from rule import Rule, record_object
 from response_validation import object_array, identifier
 
 ENDPOINTS = {'Host': 'hosts', 'Network': 'networks', 'Range': 'ranges',
@@ -16,6 +16,7 @@ class FMCClient(Transport):
     def __init__(self, base_url, domain=None, **kwargs):
         super().__init__(base_url, **kwargs)
         self.domain, self.token, self.cache = domain, None, {}
+        self.raw_cache, self.referenced_objects, self.object_issues = {}, {}, []
 
     def login(self, username, password):
         self.token = None
@@ -100,9 +101,11 @@ class FMCClient(Transport):
             raise ValidationError('Unsupported FMC object reference')
         if key in stack:
             raise ValidationError('Cyclic FMC object group')
-        if key in self.cache:
-            return self.cache[key]
-        obj = self.get('/object/' + ENDPOINTS[typ] + '/' + quote(ident, safe=''))
+        # Cache HTTP responses, but traverse each rule's groups again so that
+        # its inventory includes all nested members even on a cache hit.
+        if key not in self.raw_cache:
+            self.raw_cache[key] = self.get('/object/' + ENDPOINTS[typ] + '/' + quote(ident, safe=''))
+        obj = self.raw_cache[key]
         if obj.get('type') != typ or obj.get('id') != ident or obj.get('overrides') or obj.get('overridable'):
             raise ValidationError('Invalid FMC object or unresolved override')
         values = set()
@@ -118,6 +121,8 @@ class FMCClient(Transport):
             values.update(self.literal(obj, kind))
         if not values:
             raise ValidationError('Empty FMC object')
+        record_object(self.referenced_objects, self.object_issues,
+                      obj.get('name', ref.get('name')), kind, values)
         self.cache[key] = frozenset(values)
         return self.cache[key]
 
@@ -125,8 +130,6 @@ class FMCClient(Transport):
     def literal(obj, kind):
         if not isinstance(obj, dict):
             raise ValidationError('Invalid FMC literal')
-        if obj.get('sourcePort') or obj.get('sourcePorts'):
-            raise ValidationError('Unsupported FMC source port constraint')
         if kind == 'network':
             if obj.get('type') not in ('Host', 'Network', 'Range') or 'value' not in obj:
                 raise ValidationError('Unsupported FMC network literal')
@@ -140,27 +143,34 @@ class FMCClient(Transport):
     def policy_rules(self, policy_uuid):
         identifier(policy_uuid)
         self.cache.clear()  # no stale object values across comparisons
+        self.raw_cache.clear()
         result = []
         for index, raw in enumerate(self.collection('/policy/accesspolicies/' + quote(policy_uuid, safe='') + '/accessrules')):
-            issues, objects = [], {}
+            issues, objects, service_objects = [], {}, []
+            self.referenced_objects, self.object_issues = {}, []
             def field(name, kind):
                 container = raw.get(name, {})
                 if not isinstance(container, dict) or container.keys() - {'objects', 'literals'}:
                     raise ValidationError('Unsupported FMC rule container')
                 values, names = set(), []
                 for ref in object_array(container, 'objects'):
-                    resolved = self.resolve(ref, kind)
-                    label = ref.get('name', ref['id'])
+                    label = ref.get('name')
                     identifier(label)
                     names.append(label)
-                    if kind == 'network':
-                        if label in objects and objects[label] != sorted(resolved):
-                            raise ValidationError('Conflicting FMC object names')
-                        objects[label] = sorted(resolved)
-                    values.update(resolved)
+                    if kind == 'service':
+                        service_objects.append(label)
+                    try:
+                        resolved = self.resolve(ref, kind)
+                        if kind == 'network':
+                            objects[label] = sorted(resolved)
+                        values.update(resolved)
+                    except (APIError, ValidationError):
+                        self.object_issues.append('Referenced object could not be resolved')
+                        if kind == 'service':
+                            issues.append('Destination service could not be resolved')
                 for i, lit in enumerate(object_array(container, 'literals')):
                     resolved = self.literal(lit, kind)
-                    label = f'@{name}:{i}'
+                    label = '@literal:' + ','.join(sorted(resolved)) if kind == 'network' else f'@{name}:{i}'
                     names.append(label)
                     if kind == 'network':
                         objects[label] = sorted(resolved)
@@ -172,25 +182,14 @@ class FMCClient(Transport):
                     else:
                         values = service('ip')
                 return names if kind == 'network' else sorted(values)
-            for key in ('sourcePorts', 'sourceZones', 'destinationZones', 'users', 'applications', 'urls', 'vlanTags', 'sourceSecurityGroupTags', 'destinationSecurityGroupTags', 'timeRange', 'sourceDynamicObjects', 'destinationDynamicObjects'):
-                if raw.get(key):
-                    issues.append('Unsupported FMC constraint: ' + key)
-            supported = {'id', 'name', 'type', 'links', 'metadata', 'action', 'enabled',
-                         'sourceNetworks', 'destinationNetworks', 'destinationPorts',
-                         'sendEventsToFMC', 'logBegin', 'logEnd', 'logFiles', 'enableSyslog',
-                         'syslogConfig', 'variableSet', 'ruleIndex', 'category', 'section'}
-            for key in raw.keys() - supported:
-                if raw[key]:
-                    issues.append('Unreviewed FMC rule field: ' + key)
-            if raw.get('action') not in ('ALLOW', 'BLOCK'):
-                issues.append('Unsupported FMC action')
-            if not isinstance(raw.get('enabled'), bool):
-                issues.append('Missing FMC enabled state')
+            # All fields outside the user's three comparison fields are ignored.
             src = field('sourceNetworks', 'network')
             dst = field('destinationNetworks', 'network')
             svc = field('destinationPorts', 'service')
             result.append(Rule(raw['id'], src, dst, svc,
                                'DROP' if raw.get('action') == 'BLOCK' else 'ALLOW',
-                               raw.get('enabled'), objects, issues))
+                               raw.get('enabled'), objects, issues,
+                               list(self.referenced_objects.values()), service_objects,
+                               self.object_issues))
         return result
 

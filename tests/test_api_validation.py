@@ -124,18 +124,18 @@ class APIValidationTests(unittest.TestCase):
             self.assertEqual(report['error_details'], [{'stage': stage, 'category': 'api_error'}])
             self.assertNotIn('DO-NOT-EXPOSE', json.dumps(report))
 
-    def test_report_explains_legacy_limits(self):
+    def test_report_does_not_claim_protocol_validation_for_legacy_services(self):
         rule = Rule('1', ['source'], ['destination'], ['443'])
         report = compare_rules([rule], [rule])
         self.assertEqual(report['summary'], {'source_rules': 1, 'target_rules': 1})
-        self.assertTrue(any('names only' in warning for warning in report['warnings']))
-        self.assertTrue(any('no protocol' in warning for warning in report['warnings']))
+        self.assertEqual(report['status'], 'INDETERMINATE')
 
-    def test_missing_rule_includes_resolved_values(self):
+    def test_rule_report_only_includes_comparison_fields(self):
         source = Rule('1', ['source'], ['destination'], [('6', 443, 443)],
                       object_values={'source': ['192.0.2.1'], 'destination': ['198.51.100.0/24']})
         target = Rule('2', ['source'], ['destination'], [('17', 443, 443)],
                       object_values=source.object_values)
         report = compare_rules([source], [target])
-        self.assertEqual(report['missing'][0]['resolved_sources'], ['192.0.2.1/32'])
-        self.assertEqual(report['extra'][0]['resolved_destinations'], ['198.51.100.0/24'])
+        self.assertEqual(report['missing'][0]['sources'], ['source'])
+        self.assertNotIn('resolved_sources', report['missing'][0])
+        self.assertNotIn('action', report['missing'][0])

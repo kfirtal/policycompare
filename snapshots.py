@@ -8,7 +8,8 @@ from rule import Rule
 REQUIRED_FIELDS = {
     'rule_number', 'source_objects', 'destination_objects', 'destination_services',
 }
-OPTIONAL_FIELDS = {'action', 'enabled', 'object_values', 'issues'}
+OPTIONAL_FIELDS = {'action', 'enabled', 'object_values', 'issues',
+                   'referenced_objects', 'service_objects', 'object_issues'}
 
 
 def load_snapshot(path):
@@ -48,9 +49,31 @@ def load_snapshot(path):
             raise ValidationError(error + ': issues must be an array of strings')
 
         fields = dict(record)
+        for field in ('referenced_objects', 'service_objects', 'object_issues'):
+            if field in record and not isinstance(record[field], list):
+                raise ValidationError(error + ': inventory fields must be arrays')
         fields['destination_services'] = [
             tuple(service) if isinstance(service, list) else service
             for service in record['destination_services']
         ]
         rules.append(Rule(**fields))
     return rules
+
+
+def save_snapshot(rules, path):
+    """Persist both comparison inputs; never include API credentials/responses."""
+    records = []
+    for rule in rules:
+        records.append(dict(rule_number=rule.rule_number,
+                            source_objects=list(rule.source_objects),
+                            destination_objects=list(rule.destination_objects),
+                            destination_services=list(rule.destination_services),
+                            referenced_objects=rule.referenced_objects,
+                            service_objects=rule.service_objects,
+                            issues=list(rule.issues), object_issues=list(rule.object_issues)))
+    # Omit unavailable inventory instead of claiming that it is an empty list.
+    for record in records:
+        if record['referenced_objects'] is None:
+            del record['referenced_objects']
+    with open(path, 'x', encoding='utf-8') as stream:
+        json.dump(records, stream, ensure_ascii=False, indent=2)

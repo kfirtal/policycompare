@@ -3,7 +3,7 @@ import xml.etree.ElementTree as ET
 from transport import Transport
 from errors import APIError, ValidationError
 from normalization import networks, service
-from rule import Rule
+from rule import Rule, record_object
 
 
 def parse_xml(text):
@@ -38,6 +38,7 @@ class CSMClient(Transport):
     def __init__(self, base_url, **kwargs):
         super().__init__(base_url, **kwargs)
         self.cookie, self.cache = None, {}
+        self.referenced_objects, self.object_issues = {}, []
 
     def call(self, path, root_name, fields=None):
         root = ET.Element('{' + 'csm' + '}' + root_name)
@@ -113,6 +114,8 @@ class CSMClient(Transport):
                 values.update(self.parameter(param, stack + (gid,)))
         if not values:
             raise ValidationError('Empty or unsupported CSM object')
+        record_object(self.referenced_objects, self.object_issues,
+                      obj.findtext('name'), kind, values)
         return frozenset(values)
 
     def port_list(self, gid, stack=()):
@@ -131,11 +134,11 @@ class CSMClient(Transport):
             result.append(required(a, 'portNum') + '-' + required(b, 'portNum'))
         if not result:
             raise ValidationError('Empty CSM port list')
+        record_object(self.referenced_objects, self.object_issues,
+                      obj.findtext('name'), 'port_list', result)
         return result
 
     def parameter(self, param, stack=()):
-        if param.find('sourcePort') is not None or (param.findtext('icmpMessage') or '').strip():
-            raise ValidationError('Unsupported CSM source port or ICMP constraint')
         protocol = required(param, 'protocol')
         if any(child.tag not in ('protocol', 'destinationPort', 'sourcePort', 'icmpMessage') for child in param):
             raise ValidationError('Unreviewed CSM service field')
@@ -212,7 +215,8 @@ class CSMClient(Transport):
         result = []
         rules = root.findall('./deviceAccessRuleFirewallPolicy') + root.findall('./policy/deviceAccessRuleFirewallPolicy')
         for raw in rules:
-            objects, issues = {}, []
+            objects, issues, service_objects = {}, [], []
+            self.referenced_objects, self.object_issues = {}, []
             def field(name):
                 container = raw.find(name)
                 if container is None or len(raw.findall(name)) != 1:
@@ -226,38 +230,24 @@ class CSMClient(Transport):
                     obj = self.object(gid)
                     label = required(obj, 'name')
                     names.append(label)
-                    resolved = sorted(self.resolve(gid, 'network'))
-                    if label in objects and objects[label] != resolved:
-                        raise ValidationError('Conflicting CSM object names')
-                    objects[label] = resolved
+                    try:
+                        resolved = sorted(self.resolve(gid, 'network'))
+                        if label in objects and objects[label] != resolved:
+                            raise ValidationError('Conflicting CSM object names')
+                        objects[label] = resolved
+                    except (APIError, ValidationError):
+                        self.object_issues.append('Referenced network object could not be resolved')
                 for i, literal in enumerate(container.findall('ipv4Data') + container.findall('ipData')):
-                    label = f'@{name}:{i}'
+                    resolved = sorted(networks([literal.text]))
+                    label = '@literal:' + ','.join(resolved)
                     names.append(label)
-                    objects[label] = sorted(networks([literal.text]))
+                    objects[label] = resolved
                 if not names:
                     names = ['@any']
                     objects['@any'] = ['0.0.0.0/0', '::/0']
                 return names
-            for key in ('interfaceRoleObjectGIDs', 'users', 'timeRangeObjectId', 'timeRangeObjectGID', 'securityGroups'):
-                node = raw.find(key)
-                if node is not None and (len(node) or (node.text or '').strip()):
-                    issues.append('Unsupported CSM constraint: ' + key)
-            for path in ('sources/interfaceRoleObjectGIDs/gid', 'destinations/interfaceRoleObjectGIDs/gid'):
-                if raw.find(path) is not None:
-                    issues.append('Unsupported CSM interface constraint')
-            if raw.findtext('iosOptions', 'none').lower() != 'none':
-                issues.append('Unsupported CSM IOS option')
-            supported = {'gid', 'name', 'lastUpdateTime', 'updatedByUser', 'lastCommitTime',
-                         'activityName', 'type', 'orderId', 'isMandatoryAggregation',
-                         'configState', 'isEnabled', 'direction', 'permit', 'sources',
-                         'destinations', 'services', 'logOptions', 'iosOptions', 'comment',
-                         'interfaceRoleObjectGIDs'}
-            for child in raw:
-                if child.tag not in supported and (len(child) or (child.text or '').strip()):
-                    issues.append('Unreviewed CSM rule field: ' + child.tag)
-            permit, enabled = required(raw, 'permit'), required(raw, 'isEnabled')
-            if permit not in ('true', 'false') or enabled not in ('true', 'false'):
-                raise ValidationError('Invalid CSM boolean')
+            # Action, enabled state, interfaces and users do not participate.
+            permit, enabled = raw.findtext('permit'), raw.findtext('isEnabled')
             svc = set()
             container = raw.find('services')
             if container is None or len(raw.findall('services')) != 1:
@@ -265,14 +255,22 @@ class CSMClient(Transport):
             if any(child.tag not in ('serviceObjectGIDs', 'serviceParameters') for child in container):
                 raise ValidationError('Unsupported CSM service constraint')
             for ref in container.findall('./serviceObjectGIDs/gid'):
-                svc.update(self.resolve(required(ref, '.'), 'service'))
+                gid = required(ref, '.')
+                service_objects.append(required(self.object(gid), 'name'))
+                try:
+                    svc.update(self.resolve(gid, 'service'))
+                except (APIError, ValidationError):
+                    issues.append('Destination service could not be resolved')
+                    self.object_issues.append('Referenced service object could not be resolved')
             for param in container.findall('serviceParameters'):
                 svc.update(self.parameter(param))
             if not svc:
                 svc = service('ip')
             result.append(Rule(required(raw, 'orderId'), field('sources'), field('destinations'),
                                sorted(svc), 'ALLOW' if permit == 'true' else 'DROP',
-                               enabled == 'true', objects, issues))
+                               enabled == 'true', objects, issues,
+                               list(self.referenced_objects.values()), service_objects,
+                               self.object_issues))
         return result
 
     def policy_rules(self, name):
