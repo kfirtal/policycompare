@@ -40,6 +40,17 @@ def find_gaps(csm_list, fmc_list):
     return [r for r in csm_list if signature(r) not in signatures]
 
 
+def report_context(source, target):
+    """Expose counts and comparison limits without claiming full equivalence."""
+    warnings = ['Comparison covers supported access-rule fields; rule order is ignored.']
+    if any(not rule.object_values for rule in source + target):
+        warnings.append('Some rules compare network names only; object values are not verified for those rules.')
+    if any(isinstance(value, str) for rule in source + target for value in
+           (rule.destination_services if isinstance(rule.destination_services, (list, tuple, set, frozenset)) else [])):
+        warnings.append('Some services have no protocol; TCP/UDP identity is not verified for those services.')
+    return dict(summary={'source_rules': len(source), 'target_rules': len(target)}, warnings=warnings)
+
+
 def compare_rules(source, target, allow_empty=False):
     """Report both directions; invalid input always prevents a PASS."""
     source, target = list(source), list(target)
@@ -53,7 +64,8 @@ def compare_rules(source, target, allow_empty=False):
             except (ValidationError, TypeError, ValueError) as exc:
                 errors.append(f'{side} rule {r.rule_number}: {exc}')
     if errors:
-        return dict(status='INDETERMINATE', errors=errors, missing=[], extra=[], changed_objects=[])
+        return dict(status='INDETERMINATE', errors=errors, missing=[], extra=[], changed_objects=[],
+                    **report_context(source, target))
     missing, extra = find_gaps(source, target), find_gaps(target, source)
     changed = []
     def inventory(rules):
@@ -72,19 +84,31 @@ def compare_rules(source, target, allow_empty=False):
     def detail(r):
         return dict(rule_number=r.rule_number, action=r.action, enabled=r.enabled,
                     sources=list(r.source_objects), destinations=list(r.destination_objects),
-                    services=sorted(services(r.destination_services)))
+                    services=sorted(services(r.destination_services)),
+                    resolved_sources=sorted(signature(r)[2]) if r.object_values else None,
+                    resolved_destinations=sorted(signature(r)[3]) if r.object_values else None)
     return dict(status='FAIL' if missing or extra else 'PASS', errors=[],
-                missing=[detail(r) for r in missing], extra=[detail(r) for r in extra], changed_objects=changed)
+                missing=[detail(r) for r in missing], extra=[detail(r) for r in extra], changed_objects=changed,
+                **report_context(source, target))
 
 
 def compare_policies(csm_client, csm_name, fmc_client, fmc_name):
     """Use only with explicitly authorized, already authenticated clients."""
+    stage = 'csm_policy_read'
     try:
         source = csm_client.policy_rules(csm_name)
-        target = fmc_client.policy_rules(fmc_client.policy_uuid_by_name(fmc_name))
+        stage = 'fmc_policy_lookup'
+        policy_id = fmc_client.policy_uuid_by_name(fmc_name)
+        stage = 'fmc_policy_read'
+        target = fmc_client.policy_rules(policy_id)
+        stage = 'comparison'
         return compare_rules(source, target)
-    except (APIError, ValidationError, KeyError, TypeError, ValueError):
+    except (APIError, ValidationError, KeyError, TypeError, ValueError) as exc:
+        # Do not copy exception text: an adapter or HTTP library may include
+        # response bodies, URLs or credentials. Stage/category are safe context.
+        category = 'api_error' if isinstance(exc, APIError) else 'invalid_response'
         return dict(status='INDETERMINATE', errors=['Policy retrieval or parsing failed'],
+                    error_details=[dict(stage=stage, category=category)],
                     missing=[], extra=[], changed_objects=[])
 
 

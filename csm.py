@@ -15,13 +15,20 @@ def parse_xml(text):
         raise ValidationError('Invalid CSM XML') from None
     for node in root.iter():
         node.tag = node.tag.rsplit('}', 1)[-1]
-    if root.find('.//error') is not None:
+    if root.tag == 'error' or root.find('.//error') is not None:
         raise APIError('CSM returned an application error')
+    for node in root.iter():
+        if node.tag in ('networkObjectGIDs', 'serviceObjectGIDs', 'refGIDs'):
+            if (node.text or '').strip() or any(child.tag != 'gid' for child in node):
+                raise ValidationError('Invalid CSM reference list')
     return root
 
 
 def required(node, path):
-    value = node.findtext(path)
+    matches = node.findall(path)
+    if len(matches) != 1 or len(matches[0]):
+        raise ValidationError('Expected exactly one scalar CSM field: ' + path)
+    value = matches[0].text
     if value is None or not value.strip():
         raise ValidationError('Missing CSM field: ' + path)
     return value.strip()
@@ -43,6 +50,8 @@ class CSMClient(Transport):
         return response, parse_xml(response.text)
 
     def login(self, username, password):
+        self.cookie = None
+        self.cache.clear()
         response, _ = self.call('/login', 'loginRequest', {'username': username, 'password': password})
         self.cookie = response.cookies.get('asCookie')
         if not self.cookie:
@@ -130,11 +139,16 @@ class CSMClient(Transport):
         protocol = required(param, 'protocol')
         if any(child.tag not in ('protocol', 'destinationPort', 'sourcePort', 'icmpMessage') for child in param):
             raise ValidationError('Unreviewed CSM service field')
+        if len(param.findall('destinationPort')) > 1:
+            raise ValidationError('Repeated CSM destination port')
         dest = param.find('destinationPort')
         if dest is None:
             return service(protocol)
-        direct = dest.findtext('port')
-        ref = dest.findtext('portRefGID') or dest.findtext('portRef')
+        if len(dest) != 1 or dest[0].tag not in ('port', 'portRefGID', 'portRef'):
+            raise ValidationError('Invalid CSM destination port choice')
+        # An explicitly empty port is malformed, not an omitted Any constraint.
+        direct = required(dest, 'port') if dest[0].tag == 'port' else None
+        ref = required(dest, dest[0].tag) if direct is None else None
         if (direct is None) == (ref is None):
             raise ValidationError('Invalid CSM destination port')
         return set().union(*(service(protocol, port) for port in
@@ -147,7 +161,7 @@ class CSMClient(Transport):
         self.cache.clear()
         while True:
             root = self.query('getPolicyConfigByName', 'policyConfigByNameRequest', fields)
-            if root.tag != 'policyConfigDeviceResponse' or root.find('policy') is None:
+            if root.tag != 'policyConfigDeviceResponse' or len(root.findall('policy')) != 1:
                 raise ValidationError('Invalid CSM policy response')
             if root.find('overrideDetails') is not None:
                 raise ValidationError('CSM device overrides require explicit resolution')
@@ -172,7 +186,7 @@ class CSMClient(Transport):
                     raise ValidationError('Incomplete CSM pagination')
                 return ET.tostring(combined, encoding='unicode')
             try:
-                end, count = int(end), int(count)
+                end, count = int(required(root, 'endIndex')), int(required(root, 'totalCount'))
             except (ValueError, TypeError):
                 raise ValidationError('Invalid CSM pagination metadata') from None
             if end <= index or end != rows or count < end or (total is not None and count != total):
@@ -188,6 +202,11 @@ class CSMClient(Transport):
             raise ValidationError('Invalid CSM policy snapshot')
         if root.find('endIndex') is not None or root.find('totalCount') is not None:
             raise ValidationError('Parse the complete CSM policy, not an individual page')
+        if len(root.findall('policy')) > 1:
+            raise ValidationError('Repeated CSM policy container')
+        for container in root.findall('policy'):
+            if any(child.tag != 'deviceAccessRuleFirewallPolicy' for child in container):
+                raise ValidationError('Unreviewed CSM policy row')
         for obj in root.findall('./policyObject/*'):
             self.cache[required(obj, 'gid')] = obj
         result = []
@@ -196,7 +215,7 @@ class CSMClient(Transport):
             objects, issues = {}, []
             def field(name):
                 container = raw.find(name)
-                if container is None:
+                if container is None or len(raw.findall(name)) != 1:
                     raise ValidationError('Missing CSM network container')
                 for child in container:
                     if child.tag not in ('networkObjectGIDs', 'ipv4Data', 'ipData', 'interfaceRoleObjectGIDs'):
@@ -241,7 +260,7 @@ class CSMClient(Transport):
                 raise ValidationError('Invalid CSM boolean')
             svc = set()
             container = raw.find('services')
-            if container is None:
+            if container is None or len(raw.findall('services')) != 1:
                 raise ValidationError('Missing CSM services')
             if any(child.tag not in ('serviceObjectGIDs', 'serviceParameters') for child in container):
                 raise ValidationError('Unsupported CSM service constraint')

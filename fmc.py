@@ -5,6 +5,7 @@ from transport import Transport
 from errors import APIError, ValidationError
 from normalization import networks, service
 from rule import Rule
+from response_validation import object_array, identifier
 
 ENDPOINTS = {'Host': 'hosts', 'Network': 'networks', 'Range': 'ranges',
              'NetworkGroup': 'networkgroups', 'ProtocolPortObject': 'protocolportobjects',
@@ -17,10 +18,17 @@ class FMCClient(Transport):
         self.domain, self.token, self.cache = domain, None, {}
 
     def login(self, username, password):
+        self.token = None
+        self.cache.clear()
         response = self.request('POST', '/api/fmc_platform/v1/auth/generatetoken', auth=(username, password))
         try:
             token = response.headers['X-auth-access-token']
             domains = json.loads(response.headers['DOMAINS'])
+            if not isinstance(domains, list) or any(not isinstance(d, dict) for d in domains):
+                raise ValueError()
+            for domain in domains:
+                identifier(domain.get('uuid'))
+            identifier(token)
             if self.domain is None:
                 if len(domains) != 1:
                     raise ValueError()
@@ -58,8 +66,13 @@ class FMCClient(Transport):
             if total is not None and count != total:
                 raise ValidationError('FMC collection changed during pagination')
             total = count
+            if 'offset' in paging and (type(paging['offset']) is not int or paging['offset'] != offset):
+                raise ValidationError('Unexpected FMC page offset')
             for item in items:
-                if not isinstance(item, dict) or not item.get('id') or item['id'] in seen:
+                if not isinstance(item, dict):
+                    raise ValidationError('Invalid FMC collection item')
+                identifier(item.get('id'))
+                if item['id'] in seen:
                     raise ValidationError('Missing or repeated FMC item ID')
                 seen.add(item['id'])
             result.extend(items)
@@ -76,9 +89,14 @@ class FMCClient(Transport):
         return matches[0]
 
     def resolve(self, ref, kind, stack=()):
+        if not isinstance(ref, dict):
+            raise ValidationError('Invalid FMC object reference')
         typ, ident = ref.get('type'), ref.get('id')
+        identifier(ident)
         key = (typ, ident, kind)
-        if typ not in ENDPOINTS or not ident:
+        allowed_types = {'network': {'Host', 'Network', 'Range', 'NetworkGroup'},
+                         'service': {'ProtocolPortObject', 'PortObjectGroup'}}
+        if not isinstance(typ, str) or typ not in allowed_types.get(kind, set()):
             raise ValidationError('Unsupported FMC object reference')
         if key in stack:
             raise ValidationError('Cyclic FMC object group')
@@ -89,9 +107,11 @@ class FMCClient(Transport):
             raise ValidationError('Invalid FMC object or unresolved override')
         values = set()
         if typ in ('NetworkGroup', 'PortObjectGroup'):
-            for member in obj.get('objects', []):
+            for member in object_array(obj, 'objects'):
                 values.update(self.resolve(member, kind, stack + (key,)))
-            literals = obj.get('literals', obj.get('literal', []))
+            if 'literals' in obj and 'literal' in obj:
+                raise ValidationError('Ambiguous FMC literal arrays')
+            literals = object_array(obj, 'literals' if 'literals' in obj else 'literal')
             for lit in literals:
                 values.update(self.literal(lit, kind))
         else:
@@ -103,6 +123,8 @@ class FMCClient(Transport):
 
     @staticmethod
     def literal(obj, kind):
+        if not isinstance(obj, dict):
+            raise ValidationError('Invalid FMC literal')
         if obj.get('sourcePort') or obj.get('sourcePorts'):
             raise ValidationError('Unsupported FMC source port constraint')
         if kind == 'network':
@@ -111,9 +133,12 @@ class FMCClient(Transport):
             return networks([obj['value']])
         if obj.get('type') not in ('PortLiteral', 'ProtocolPortObject') or 'protocol' not in obj:
             raise ValidationError('Unsupported FMC service literal')
+        if 'port' in obj and (obj['port'] is None or not str(obj['port']).strip()):
+            raise ValidationError('Explicit FMC port value is empty')
         return service(obj['protocol'], obj.get('port'))
 
     def policy_rules(self, policy_uuid):
+        identifier(policy_uuid)
         self.cache.clear()  # no stale object values across comparisons
         result = []
         for index, raw in enumerate(self.collection('/policy/accesspolicies/' + quote(policy_uuid, safe='') + '/accessrules')):
@@ -123,16 +148,17 @@ class FMCClient(Transport):
                 if not isinstance(container, dict) or container.keys() - {'objects', 'literals'}:
                     raise ValidationError('Unsupported FMC rule container')
                 values, names = set(), []
-                for ref in container.get('objects', []):
+                for ref in object_array(container, 'objects'):
                     resolved = self.resolve(ref, kind)
                     label = ref.get('name', ref['id'])
+                    identifier(label)
                     names.append(label)
                     if kind == 'network':
                         if label in objects and objects[label] != sorted(resolved):
                             raise ValidationError('Conflicting FMC object names')
                         objects[label] = sorted(resolved)
                     values.update(resolved)
-                for i, lit in enumerate(container.get('literals', [])):
+                for i, lit in enumerate(object_array(container, 'literals')):
                     resolved = self.literal(lit, kind)
                     label = f'@{name}:{i}'
                     names.append(label)
