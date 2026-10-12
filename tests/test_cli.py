@@ -23,7 +23,7 @@ class CLITests(unittest.TestCase):
     def test_preflight_prints_hebrew_even_with_limited_windows_encoding(self):
         result = self.run_script('lab.py', '--csm-url', 'https://example.invalid/nbi',
                                  '--fmc-url', 'https://example.invalid', '--csm-policy', 'example-policy',
-                                 '--fmc-policy', 'example-policy', '--fmc-version', '7.4.1',
+                                 '--fmc-policy', 'example-policy', '--fmc-version', '7.6.5',
                                  '--output-dir', 'reports/cli-preflight-no-write')
         self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8'))
         self.assertIn('לא בוצעו חיבורים', result.stdout.decode('utf-8'))

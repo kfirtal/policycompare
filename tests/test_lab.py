@@ -38,7 +38,7 @@ class LabTests(unittest.TestCase):
     def argv(self, *extra):
         return ['--csm-url', 'https://example.invalid/nbi', '--fmc-url', 'https://example.invalid',
                 '--csm-policy', 'example-policy', '--fmc-policy', 'example-policy',
-                '--fmc-version', '7.4.1', '--output-dir', str(self.output), *extra]
+                '--fmc-version', '7.6.5', '--output-dir', str(self.output), *extra]
 
     def args(self, *extra):
         return lab.parser().parse_args(self.argv('--connect', *extra))
@@ -100,7 +100,7 @@ class LabTests(unittest.TestCase):
         self.assertEqual(len(list(self.output.iterdir())), 7)
         manifest = json.loads((self.output / 'run.json').read_text(encoding='utf-8'))
         self.assertEqual(manifest['completed_snapshots'], ['csm', 'fmc'])
-        self.assertEqual(manifest['declared_versions']['fmc'], '7.4.1')
+        self.assertEqual(manifest['declared_versions']['fmc'], '7.6.5')
         contents = ''.join(path.read_text(encoding='utf-8') for path in self.output.iterdir())
         for secret in ('synthetic-user', 'synthetic-password', 'example.invalid'):
             self.assertNotIn(secret, contents)

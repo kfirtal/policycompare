@@ -2,7 +2,7 @@
 
 ## מטרת המעבדה
 
-לוודא שהפענוח פועל מול CSM 4.25 וגרסת FMC המותקנת, וששני הדוחות מזהים
+לוודא שהפענוח פועל מול CSM 4.25 ו־FMC 7.6.5 ומעלה, וששני הדוחות מזהים
 את הפערים הידועים במדיניות בדיקה. הבדיקות המדומות בקוד אינן אישור תאימות לשרתים.
 הכלי קורא מדיניות ואובייקטים בלבד; הוא אינו יוצר, משנה או פורס חוקי חומת אש.
 הזדהות ויציאה מ־CSM משתמשות ב־POST, וכך גם שאילתות הקריאה שלו.
@@ -20,7 +20,7 @@
 אפשר להריץ בדיקת הגדרות ללא אישור חיבור; היא אינה מבצעת שום בקשת HTTP:
 
 ```powershell
-python lab.py --csm-url https://example.invalid/nbi --fmc-url https://example.invalid --csm-policy example-policy --fmc-policy example-policy --fmc-version 7.4.1 --output-dir reports/lab-001
+python lab.py --csm-url https://example.invalid/nbi --fmc-url https://example.invalid --csm-policy example-policy --fmc-policy example-policy --fmc-version 7.6.5 --output-dir reports/lab-001
 ```
 
 הכתובות והשמות הם דוגמאות סינתטיות. לפני מעבדה מחליפים אותם בערכים המורשים.
@@ -104,6 +104,9 @@ PASS מתייחס לתחום שאושר: שמות Source/Destination, פרוטו
 מחזירים חוסר ודאות במסלול הרלוונטי. יש להתאים את התרחישים לתחום הנתמך.
 
 מקורות: [CSM 4.25 API](https://www.cisco.com/c/dam/en/us/td/docs/security/security_management/cisco_security_manager/security_manager/425/API/CSM-API-Spec-v25.pdf),
-[FMC 7.4.1 objects](https://www.cisco.com/c/en/us/td/docs/security/firepower/741/api/REST/secure_firewall_management_center_rest_api_quick_start_guide_741/Objects_In_The_REST_API.html),
-[FMC authentication](https://www.cisco.com/c/en/us/td/docs/security/firepower/741/api/REST/secure_firewall_management_center_rest_api_quick_start_guide_741/Connecting_With_A_Client.html).
-גרסת FMC בפועל עדיין לא נמסרה, ולכן אין הצהרת תאימות לגרסה מותקנת.
+[FMC 7.6 objects](https://www.cisco.com/c/en/us/td/docs/security/firepower/760/api/REST/secure_firewall_management_center_rest_api_quick_start_guide_760/Objects_In_The_REST_API.html),
+[FMC 7.6 authentication](https://www.cisco.com/c/en/us/td/docs/security/firepower/760/api/REST/secure_firewall_management_center_rest_api_quick_start_guide_760/Connecting_With_A_Client.html).
+יעד הגרסה נמסר כ־7.6.5 ומעלה. המדריכים הם לסדרת 7.6 בשם 7.6.0;
+טרם בוצעה בדיקה מול שרת מותקן. יש להזין ב־`--fmc-version` את הגרסה המדויקת
+של כל שרת שנבדק, ולא טווח כמו `7.6.5+`. גרסה חדשה דורשת בדיקת הסכמה
+ב־API Explorer והרצת תרחישי הקבלה מחדש, לפני שמצהירים על תאימות אליה.

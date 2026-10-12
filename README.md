@@ -3,6 +3,8 @@
 כלי לקריאה ולהשוואה של מדיניות CSM ו־FMC. המטרה היא שתי בדיקות נפרדות:
 התאמת שלושת שדות החוק, ולאחר מכן התאמת ערכי האובייקטים המופנים מהמדיניות.
 הכלי אינו משנה חוקים או מבצע פריסה. ייבוא קובץ Python אינו מתחבר לשרת.
+יעד התאימות הוא CSM 4.25 מול FMC 7.6.5 ומעלה. זהו יעד לפיתוח ולמעבדה,
+ולא הצהרת תאימות מאומתת לכל גרסה חדשה. בכל מעבדה יש לתעד את הגרסה המדויקת.
 
 ## המבנה
 
@@ -169,7 +171,7 @@ python compare.py examples/csm.json examples/fmc-service-drift.json --output-dir
 בדיקת הגדרות בלבד, ללא בקשות לשרתים וללא הזנת פרטי הזדהות:
 
 ```powershell
-python lab.py --csm-url https://example.invalid/nbi --fmc-url https://example.invalid --csm-policy example-policy --fmc-policy example-policy --fmc-version 7.4.1 --output-dir reports/lab-001
+python lab.py --csm-url https://example.invalid/nbi --fmc-url https://example.invalid --csm-policy example-policy --fmc-policy example-policy --fmc-version 7.6.5 --output-dir reports/lab-001
 ```
 
 הכתובות והשמות כאן הם דוגמאות בלבד. גרסת FMC היא הצהרה של המפעיל,
@@ -216,7 +218,8 @@ TLS מאומת כברירת מחדל. ניתן לספק נתיב CA, `timeout` �
 דורש בדיקה מתועדת מול שרתי CSM ו־FMC במעבדה, לאחר אישור מפורש לחיבור.
 יש לבדוק התאמה, פערי חוקים, שינויי אובייקטים, קבוצות מקוננות, דפדוף וכשלים.
 
-מגבלות שנותרו: גרסת FMC לא נמסרה; מדיניות CSM מקומית, חריגות אובייקטים
+מגבלות שנותרו: תאימות FMC 7.6.5 ומעלה עדיין דורשת אימות מעבדה;
+מדיניות CSM מקומית, חריגות אובייקטים
 לפי מכשיר, FQDN ופרוטוקולים שאינם IP-any/TCP/UDP עדיין אינם נתמכים.
 אין חידוש טוקן אוטומטי או משא ומתן על גרסת שירות CSM. NAT, ניתוב, מצב פריסה
 ופעולת ברירת מחדל אינם בתחום הבדיקה.
@@ -224,5 +227,9 @@ TLS מאומת כברירת מחדל. ניתן לספק נתיב CA, `timeout` �
 ## מקורות API
 
 - [CSM 4.25 API specification](https://www.cisco.com/c/dam/en/us/td/docs/security/security_management/cisco_security_manager/security_manager/425/API/CSM-API-Spec-v25.pdf): pagination, network/service objects, port lists and shared policies.
-- [FMC 7.4.1 REST objects guide](https://www.cisco.com/c/en/us/td/docs/security/firepower/741/api/REST/secure_firewall_management_center_rest_api_quick_start_guide_741/Objects_In_The_REST_API.html): object and access-rule endpoints, expanded collections and pagination.
-- [FMC 7.4.1 authentication guide](https://www.cisco.com/c/en/us/td/docs/security/firepower/741/api/REST/secure_firewall_management_center_rest_api_quick_start_guide_741/Connecting_With_A_Client.html): explicit token generation and token expiration.
+- [FMC 7.6 REST objects guide](https://www.cisco.com/c/en/us/td/docs/security/firepower/760/api/REST/secure_firewall_management_center_rest_api_quick_start_guide_760/Objects_In_The_REST_API.html): object endpoints, expanded collections and pagination.
+- [FMC 7.6 authentication guide](https://www.cisco.com/c/en/us/td/docs/security/firepower/760/api/REST/secure_firewall_management_center_rest_api_quick_start_guide_760/Connecting_With_A_Client.html): explicit token generation and token expiration.
+
+מקורות FMC הם מדריכי סדרת 7.6, המפורסמים בשם 7.6.0. הם בסיס לבדיקת
+המימוש, ואינם מוכיחים זהות תשובות בכל עדכון תחזוקה או בגרסה עתידית.
+יש לאמת במעבדה את סכמת הקריאות שבשימוש מול API Explorer בשרת המורשה.

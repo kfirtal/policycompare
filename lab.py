@@ -22,7 +22,7 @@ def parser():
     result.add_argument('--fmc-url', required=True, help='HTTPS server origin, without an API path')
     result.add_argument('--csm-policy', required=True, help='Exact shared policy name')
     result.add_argument('--fmc-policy', required=True, help='Exact access policy name')
-    result.add_argument('--fmc-version', required=True, help='Declared lab version; not detected automatically')
+    result.add_argument('--fmc-version', required=True, help='Exact installed lab version, e.g. 7.6.5; target is 7.6.5+; not detected automatically')
     result.add_argument('--fmc-domain', help='Explicit domain UUID when the account has multiple domains')
     result.add_argument('--csm-ca', help='PEM CA bundle; system trust is used if omitted')
     result.add_argument('--fmc-ca', help='PEM CA bundle; system trust is used if omitted')
