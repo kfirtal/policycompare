@@ -166,6 +166,8 @@ class FMCClient(Transport):
                 for ref in object_array(container, 'objects'):
                     label = ref.get('name')
                     identifier(label)
+                    if label.startswith('@'):
+                        raise ValidationError('FMC object name uses a reserved internal prefix')
                     names.append(label)
                     if kind == 'service':
                         service_objects.append(label)

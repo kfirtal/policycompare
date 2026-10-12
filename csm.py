@@ -214,6 +214,8 @@ class CSMClient(Transport):
         root = parse_xml(policy)
         if root.tag != 'policyConfigDeviceResponse':
             raise ValidationError('Invalid CSM policy snapshot')
+        if root.find('overrideDetails') is not None:
+            raise ValidationError('CSM device overrides require explicit resolution')
         if root.find('endIndex') is not None or root.find('totalCount') is not None:
             raise ValidationError('Parse the complete CSM policy, not an individual page')
         if len(root.findall('policy')) > 1:
@@ -221,11 +223,21 @@ class CSMClient(Transport):
         for container in root.findall('policy'):
             if any(child.tag != 'deviceAccessRuleFirewallPolicy' for child in container):
                 raise ValidationError('Unreviewed CSM policy row')
+        seen_objects = set()
         for obj in root.findall('./policyObject/*'):
-            self.cache[required(obj, 'gid')] = obj
+            gid = required(obj, 'gid')
+            if gid in seen_objects:
+                raise ValidationError('Repeated CSM object in policy snapshot')
+            seen_objects.add(gid)
+            self.cache[gid] = obj
         result = []
         rules = root.findall('./deviceAccessRuleFirewallPolicy') + root.findall('./policy/deviceAccessRuleFirewallPolicy')
+        seen_rules = set()
         for raw in rules:
+            rule_number = required(raw, 'orderId')
+            if rule_number in seen_rules:
+                raise ValidationError('Repeated CSM rule in policy snapshot')
+            seen_rules.add(rule_number)
             objects, issues, service_objects = {}, [], []
             self.referenced_objects, self.object_issues = {}, []
             def field(name):
@@ -240,6 +252,8 @@ class CSMClient(Transport):
                     gid = required(ref, '.')
                     obj = self.object(gid)
                     label = required(obj, 'name')
+                    if label.startswith('@'):
+                        raise ValidationError('CSM object name uses a reserved internal prefix')
                     names.append(label)
                     try:
                         resolved = sorted(self.resolve(gid, 'network'))
@@ -277,7 +291,7 @@ class CSMClient(Transport):
                 svc.update(self.parameter(param))
             if not svc:
                 svc = service('ip')
-            result.append(Rule(required(raw, 'orderId'), field('sources'), field('destinations'),
+            result.append(Rule(rule_number, field('sources'), field('destinations'),
                                sorted(svc), 'ALLOW' if permit == 'true' else 'DROP',
                                enabled == 'true', objects, issues,
                                list(self.referenced_objects.values()), service_objects,

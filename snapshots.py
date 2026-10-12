@@ -12,6 +12,16 @@ OPTIONAL_FIELDS = {'action', 'enabled', 'object_values', 'issues',
                    'referenced_objects', 'service_objects', 'object_issues'}
 
 
+def unique_json_fields(pairs):
+    """JSON's default last-key-wins behavior could hide a comparison field."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValidationError('Duplicate JSON field')
+        result[key] = value
+    return result
+
+
 def load_snapshot(path):
     """Read a JSON array and reject malformed records without exposing content.
 
@@ -21,14 +31,14 @@ def load_snapshot(path):
     """
     try:
         with open(path, encoding='utf-8-sig') as stream:
-            records = json.load(stream)
+            records = json.load(stream, object_pairs_hook=unique_json_fields)
     except (OSError, ValueError):
         raise ValidationError('Invalid or unreadable snapshot') from None
 
     if not isinstance(records, list):
         raise ValidationError('Snapshot must be a JSON array of rules')
 
-    rules = []
+    rules, seen = [], set()
     for index, record in enumerate(records, start=1):
         error = f'Invalid snapshot record {index}'
         if not isinstance(record, dict):
@@ -37,16 +47,21 @@ def load_snapshot(path):
             raise ValidationError(error + ': missing required fields')
         if record.keys() - (REQUIRED_FIELDS | OPTIONAL_FIELDS):
             raise ValidationError(error + ': unrecognized fields')
+        number = record['rule_number']
+        if type(number) not in (str, int) or not str(number).strip():
+            raise ValidationError(error + ': invalid rule identifier')
+        if str(number) in seen:
+            raise ValidationError(error + ': repeated rule identifier')
+        seen.add(str(number))
         for field in ('source_objects', 'destination_objects', 'destination_services'):
             if not isinstance(record[field], list):
                 raise ValidationError(error + ': rule fields must be arrays')
         if 'object_values' in record and not isinstance(record['object_values'], dict):
             raise ValidationError(error + ': object_values must be an object')
-        if 'issues' in record and (
-            not isinstance(record['issues'], list)
-            or any(not isinstance(issue, str) for issue in record['issues'])
-        ):
-            raise ValidationError(error + ': issues must be an array of strings')
+        for field in ('issues', 'object_issues', 'service_objects'):
+            if field in record and (not isinstance(record[field], list)
+                                    or any(not isinstance(item, str) or not item.strip() for item in record[field])):
+                raise ValidationError(error + ': reference names and issues must be arrays of nonempty strings')
 
         fields = dict(record)
         for field in ('referenced_objects', 'service_objects', 'object_issues'):

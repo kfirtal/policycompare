@@ -109,6 +109,28 @@ class APIValidationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             client.PolicyRules('<policyConfigDeviceResponse><policy/><policy/></policyConfigDeviceResponse>')
 
+    def test_csm_raw_snapshot_rejects_duplicate_rows_objects_and_overrides(self):
+        client = CSMClient('https://example.invalid/nbi', session=Mock())
+        rule = '<deviceAccessRuleFirewallPolicy><orderId>1</orderId><sources/><destinations/><services/></deviceAccessRuleFirewallPolicy>'
+        obj = '<networkPolicyObject><gid>h</gid><name>example-host</name><ipv4Data>192.0.2.1</ipv4Data></networkPolicyObject>'
+        for content in ('<policy>' + rule * 2 + '</policy>',
+                        '<policyObject>' + obj * 2 + '</policyObject><policy/>',
+                        '<policy/><overrideDetails/>'):
+            with self.subTest(content=content), self.assertRaises(ValidationError):
+                client.PolicyRules('<policyConfigDeviceResponse>' + content + '</policyConfigDeviceResponse>')
+
+    def test_real_network_object_cannot_impersonate_internal_any(self):
+        csm = CSMClient('https://example.invalid/nbi', session=Mock())
+        csm.cache['h'] = parse_xml('<networkPolicyObject><name>@any</name><ipv4Data>192.0.2.1</ipv4Data></networkPolicyObject>')
+        xml = '<policyConfigDeviceResponse><policy><deviceAccessRuleFirewallPolicy><orderId>1</orderId><sources><networkObjectGIDs><gid>h</gid></networkObjectGIDs></sources><destinations/><services/></deviceAccessRuleFirewallPolicy></policy></policyConfigDeviceResponse>'
+        with self.assertRaises(ValidationError):
+            csm.PolicyRules(xml)
+        fmc = self.fmc({})
+        fmc.collection = Mock(return_value=[{'id': 'r', 'sourceNetworks': {'objects': [
+            {'id': 'h', 'type': 'Host', 'name': '@any'}]}}])
+        with self.assertRaises(ValidationError):
+            fmc.policy_rules('p')
+
     def test_failure_report_stage_and_redaction(self):
         for stage in ('csm_policy_read', 'fmc_policy_lookup', 'fmc_policy_read'):
             source, target = Mock(), Mock()

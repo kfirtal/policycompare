@@ -4,7 +4,7 @@ from normalization import networks, services
 
 def record_object(inventory, errors, name, kind, values):
     """Keep only real named references; literal values never enter this inventory."""
-    if not isinstance(name, str) or not name.strip():
+    if not isinstance(name, str) or not name.strip() or name.startswith('@'):
         errors.append('Referenced object has no usable name')
         return
     canonical = networks(values) if kind == 'network' else services(values) if kind == 'service' else frozenset(values)

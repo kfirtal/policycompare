@@ -9,15 +9,27 @@ from normalization import networks, services, ports
 from snapshots import load_snapshot
 
 
+def validate_network_names(names):
+    """Require explicit network fields and recognize only our internal markers."""
+    if not isinstance(names, (list, tuple, set, frozenset)):
+        raise ValidationError('Network object names must be a collection')
+    if not names:
+        raise ValidationError('Network fields must explicitly describe Any or object names')
+    if any(not isinstance(name, str) or not name.strip() for name in names):
+        raise ValidationError('Invalid network object name')
+    for name in names:
+        if name.startswith('@literal:'):
+            networks(name[len('@literal:'):].split(','))
+        elif name.startswith('@') and name != '@any':
+            raise ValidationError('Invalid internal network marker')
+
+
 def signature(rule):
     """Only source names, destination names and destination protocol/ports."""
     if rule.issues:
         raise ValidationError('; '.join(rule.issues))
-    for names in (rule.source_objects, rule.destination_objects):
-        if not isinstance(names, (list, tuple, set, frozenset)):
-            raise ValidationError('Network object names must be a collection')
-        if any(not isinstance(name, str) or not name.strip() for name in names):
-            raise ValidationError('Invalid network object name')
+    validate_network_names(rule.source_objects)
+    validate_network_names(rule.destination_objects)
     if not isinstance(rule.destination_services, (list, tuple, set, frozenset)):
         raise ValidationError('Destination services must be a collection')
     if not rule.destination_services:
@@ -67,7 +79,7 @@ def normalized_object(record):
     if not isinstance(record, dict):
         raise ValidationError('Invalid referenced object record')
     name, kind, values = record.get('name'), record.get('kind'), record.get('values')
-    if not isinstance(name, str) or not name.strip():
+    if not isinstance(name, str) or not name.strip() or name.startswith('@'):
         raise ValidationError('Invalid object name')
     if not isinstance(values, (list, tuple, set, frozenset)) or not values:
         raise ValidationError('Empty or malformed object values')
@@ -94,9 +106,13 @@ def normalized_object(record):
 def object_inventory(rules, side):
     inventory, affected, errors = {}, {}, []
     for rule in rules:
-        names = (rule.source_objects, rule.destination_objects, rule.service_objects)
-        if any(not isinstance(items, (list, tuple, set, frozenset))
-               or any(not isinstance(item, str) for item in items) for items in names):
+        try:
+            validate_network_names(rule.source_objects)
+            validate_network_names(rule.destination_objects)
+            if (not isinstance(rule.service_objects, (list, tuple, set, frozenset))
+                    or any(not isinstance(name, str) or not name.strip() for name in rule.service_objects)):
+                raise ValidationError('Invalid service object names')
+        except ValidationError:
             errors.append(f'{side} rule {rule.rule_number}: invalid named references')
             continue
         if rule.object_issues:

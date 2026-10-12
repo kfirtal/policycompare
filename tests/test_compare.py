@@ -42,6 +42,22 @@ class ComparisonTests(unittest.TestCase):
         a = sample_rule(issues=['Unresolved destination service'])
         self.assertEqual(compare_rules([a], [a])['status'], 'INDETERMINATE')
 
+    def test_empty_network_fields_are_not_implicit_any_in_normalized_rules(self):
+        for field in ('source_objects', 'destination_objects'):
+            rule = sample_rule()
+            setattr(rule, field, [])
+            with self.subTest(field=field):
+                result = compare_all([rule], [rule])
+                self.assertEqual(result['rules_report']['status'], 'INDETERMINATE')
+                self.assertEqual(result['objects_report']['status'], 'INDETERMINATE')
+
+    def test_invalid_internal_markers_cannot_bypass_reference_checks(self):
+        for name in ('@unrecognized', '@literal:', '@literal:invalid'):
+            rule = Rule('1', [name], ['@any'], [('any', 0, 65535)], referenced_objects=[])
+            with self.subTest(name=name):
+                self.assertEqual(compare_rules([rule], [rule])['status'], 'INDETERMINATE')
+                self.assertEqual(compare_objects([rule], [rule])['status'], 'INDETERMINATE')
+
     def test_protocol_identity(self):
         a, b = sample_rule(), sample_rule()
         b.destination_services = [('17', 80, 80)]
