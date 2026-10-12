@@ -67,6 +67,17 @@ class CSMClient(Transport):
                 self.cookie = None
                 self.cache.clear()
 
+    def close(self):
+        """Attempt server logout; always release local credentials and caches."""
+        try:
+            self.logout()
+        finally:
+            self.cookie = None
+            self.cache.clear()
+            self.referenced_objects.clear()
+            self.object_issues.clear()
+            super().close()
+
     def query(self, endpoint, root, fields):
         if not self.cookie:
             raise APIError('CSM login required')

@@ -1,6 +1,7 @@
 """Two independent comparisons: rule fields, then referenced object values."""
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from errors import APIError, ValidationError
@@ -163,6 +164,15 @@ def compare_all(source, target, allow_empty=False):
     return dict(status=status, rules_report=rules, objects_report=objects)
 
 
+def incomplete_result(stage, category):
+    """Describe a failed run without copying URLs, credentials or exceptions."""
+    detail = dict(stage=stage, category=category)
+    failure = dict(status='INDETERMINATE', errors=['Policy collection or comparison did not complete'],
+                   error_details=[detail], missing=[], extra=[])
+    return dict(status='INDETERMINATE', error_details=[detail],
+                rules_report=dict(failure), objects_report={**failure, 'changed': []})
+
+
 def compare_policies(csm_client, csm_name, fmc_client, fmc_name):
     """Requires explicit authorization and already authenticated clients."""
     stage = 'csm_policy_read'
@@ -175,11 +185,7 @@ def compare_policies(csm_client, csm_name, fmc_client, fmc_name):
         stage = 'comparison'
         return compare_all(source, target)
     except (APIError, ValidationError, KeyError, TypeError, ValueError) as exc:
-        detail = dict(stage=stage, category='api_error' if isinstance(exc, APIError) else 'invalid_response')
-        failure = dict(status='INDETERMINATE', errors=['Policy retrieval or parsing failed'], error_details=[detail],
-                       missing=[], extra=[])
-        return dict(status='INDETERMINATE', error_details=[detail],
-                    rules_report=dict(failure), objects_report={**failure, 'changed': []})
+        return incomplete_result(stage, 'api_error' if isinstance(exc, APIError) else 'invalid_response')
 
 
 def save_reports(result, directory):
@@ -204,6 +210,8 @@ def format_report(name, report):
     for key, value in report.get('summary', {}).items():
         lines.append(f'{key}: {value}')
     lines.extend('שגיאה: ' + error for error in report['errors'])
+    for detail in report.get('error_details', []):
+        lines.append('שלב: ' + detail['stage'] + '; קטגוריה: ' + detail['category'])
     for category, heading in (('missing', 'קיימים ב-CSM וחסרים ב-FMC'),
                               ('extra', 'קיימים ב-FMC וחסרים ב-CSM'),
                               ('changed', 'אובייקטים בעלי ערכים שונים')):
@@ -245,4 +253,7 @@ def main():
 
 
 if __name__ == '__main__':
+    # Windows redirected output may default to an encoding without Hebrew.
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
     raise SystemExit(main())

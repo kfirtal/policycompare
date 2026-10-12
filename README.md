@@ -14,6 +14,7 @@
 - `transport.py`: תקשורת HTTP עם TLS, זמני המתנה וטיפול מוגבל ב־429.
 - `response_validation.py`: בדיקת מבנה רשימות ומזהים בתשובות API.
 - `snapshots.py`: שמירה וטעינה של נתונים מנורמלים לצורך השוואה ללא שרתים.
+- `lab.py`: בדיקת הגדרות מקומית, ובהרצה מפורשת — איסוף, השוואה וסגירת החיבורים.
 - `errors.py`: שגיאות API ושגיאות אימות נתונים.
 - `tests/`: בדיקות מקומיות עם תשובות מדומות וכתובות שמורות לדוגמאות.
 
@@ -161,16 +162,40 @@ python compare.py examples/csm.json examples/fmc-service-drift.json --output-dir
 
 ## לקוחות API ומעבדה
 
+מדריך ההרצה והתרחישים נמצא ב־[LAB_GUIDE.md](LAB_GUIDE.md).
+בדיקת הגדרות בלבד, ללא בקשות לשרתים וללא הזנת פרטי הזדהות:
+
+```powershell
+python lab.py --csm-url https://example.invalid/nbi --fmc-url https://example.invalid --csm-policy example-policy --fmc-policy example-policy --fmc-version 7.4.1 --output-dir reports/lab-001
+```
+
+הכתובות והשמות כאן הם דוגמאות בלבד. גרסת FMC היא הצהרה של המפעיל,
+ואינה מאומתת אוטומטית. בדיקה זו אינה בודקת זמינות או הרשאות בשרתים.
+רק הוספת `--connect` מפעילה חיבור; בשלב הנוכחי אין אישור להריץ אותו.
+שמות משתמשים מוזנים בשאלה בזמן ההרצה, וסיסמאות באמצעות `getpass` ללא הדהוד.
+אם הסתרת הסיסמה אינה אפשרית, ההרצה נעצרת לפני הזדהות.
+אפשר לספק `--csm-ca`, `--fmc-ca`, `--timeout` ו־`--fmc-domain`.
+אין אפשרות לבטל אימות TLS במסלול המעבדה.
+
+כל הרצה חיה דורשת תיקייה חדשה בתוך `reports/`. בנוסף לשני הדוחות נשמרים
+`csm.snapshot.json`, `fmc.snapshot.json` ו־`run.json` עם זמני UTC, גרסאות
+מוצהרות, שלבי כשל ותוצאות ניקוי. אין בו כתובות שרת, שמות משתמשים או סודות.
+בכשל ייתכן שרק snapshot אחד נשמר. אין להסיק מכך ששתי המערכות נאספו.
+כשל יציאה מהשרת משאיר את תוצאות ההשוואה, אך התוצאה הכוללת של ההרצה
+היא `INDETERMINATE`, והכשל מופיע ב־`run.json`.
+
 יצירת לקוח אינה מתחברת. `login` מבצע הזדהות מפורשת בלבד.
 
 - `CSMClient('https://example.invalid/nbi')`: `getPolicy`, `PolicyRules`,
   `policy_rules`, `getGIDByName`, `getPolicyList`, `logout`.
 - `FMCClient('https://example.invalid', domain='explicit-domain-uuid')`:
-  `policy_uuid_by_name`, `policy_rules`. ללא domain מפורש, נדרש domain יחיד.
+  `policy_uuid_by_name`, `policy_rules`, `close`. ללא domain מפורש, נדרש domain יחיד.
 - `compare_policies(csm_client, csm_name, fmc_client, fmc_name)` מקבל לקוחות
   שכבר התחברו, ומחזיר את שני הדוחות. האחריות לסגירת החיבורים היא של הקורא.
 
 TLS מאומת כברירת מחדל. ניתן לספק נתיב CA, `timeout` ו־session מוזרק.
+`close` ב־CSM מנסה logout ומנקה את המצב המקומי גם בכשל;
+ב־FMC הוא מוחק את הטוקן המקומי וסוגר את חיבור HTTP, בלי לבטל טוקן בשרת.
 אין מעקב אחרי redirects. תגובת 429 מטופלת עד חמישה ניסיונות; כשלי HTTP,
 הזדהות ותקשורת עוצרים איסוף. פרטי חריגה גולמיים אינם מועתקים לדוחות.
 כשל איסוף ברמת המדיניות מציין את השלב ואת קטגוריית הכשל.
@@ -197,3 +222,4 @@ TLS מאומת כברירת מחדל. ניתן לספק נתיב CA, `timeout` �
 
 - [CSM 4.25 API specification](https://www.cisco.com/c/dam/en/us/td/docs/security/security_management/cisco_security_manager/security_manager/425/API/CSM-API-Spec-v25.pdf): pagination, network/service objects, port lists and shared policies.
 - [FMC 7.4.1 REST objects guide](https://www.cisco.com/c/en/us/td/docs/security/firepower/741/api/REST/secure_firewall_management_center_rest_api_quick_start_guide_741/Objects_In_The_REST_API.html): object and access-rule endpoints, expanded collections and pagination.
+- [FMC 7.4.1 authentication guide](https://www.cisco.com/c/en/us/td/docs/security/firepower/741/api/REST/secure_firewall_management_center_rest_api_quick_start_guide_741/Connecting_With_A_Client.html): explicit token generation and token expiration.

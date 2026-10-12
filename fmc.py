@@ -21,6 +21,7 @@ class FMCClient(Transport):
     def login(self, username, password):
         self.token = None
         self.cache.clear()
+        self.raw_cache.clear()
         response = self.request('POST', '/api/fmc_platform/v1/auth/generatetoken', auth=(username, password))
         try:
             token = response.headers['X-auth-access-token']
@@ -39,6 +40,15 @@ class FMCClient(Transport):
         except (KeyError, ValueError, TypeError):
             raise APIError('Invalid token or ambiguous FMC domain') from None
         self.token, self.cache = token, {}
+
+    def close(self):
+        """Discard the local token; the server token expires independently."""
+        self.token = None
+        self.cache.clear()
+        self.raw_cache.clear()
+        self.referenced_objects.clear()
+        self.object_issues.clear()
+        super().close()
 
     def get(self, path, **kwargs):
         if not self.token or not self.domain:

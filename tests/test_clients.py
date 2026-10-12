@@ -109,6 +109,39 @@ class ClientTests(unittest.TestCase):
         self.assertIn(b'<startIndex>1</startIndex>', session.request.call_args.kwargs['data'])
         self.assertIn(b'a&amp;b', session.request.call_args.kwargs['data'])
 
+    def test_large_cross_vendor_policies_read_every_page(self):
+        from compare import compare_all
+        first = ''.join(xml_rule(str(i)) for i in range(1000))
+        last = ''.join(xml_rule(str(i)) for i in range(1000, 1005))
+        source, source_session = csm(
+            response(text='<policyConfigDeviceResponse><policy>' + first + '</policy><endIndex>1000</endIndex><totalCount>1005</totalCount></policyConfigDeviceResponse>'),
+            response(text='<policyConfigDeviceResponse><policy>' + last + '</policy></policyConfigDeviceResponse>'))
+        def rows(start, end):
+            return [{'id': str(i), 'destinationPorts': {'literals': [
+                {'type': 'PortLiteral', 'protocol': '6', 'port': '80'}]}} for i in range(start, end)]
+        target, target_session = fmc(
+            response({'items': rows(0, 1000), 'paging': {'count': 1005, 'offset': 0}}),
+            response({'items': rows(1000, 1005), 'paging': {'count': 1005, 'offset': 1000}}))
+        result = compare_all(source.policy_rules('example-policy'), target.policy_rules('p'))
+        self.assertEqual(result['status'], 'PASS')
+        self.assertEqual(result['rules_report']['summary'], {'source_rules': 1005, 'target_rules': 1005})
+        self.assertEqual(source_session.request.call_count, 2)
+        self.assertEqual(target_session.request.call_count, 2)
+
+    def test_timeout_must_be_finite_positive_number(self):
+        for value in (0, -1, float('nan'), float('inf'), None, True, '30'):
+            session = Mock()
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                FMCClient('https://example.invalid', session=session, timeout=value)
+            session.request.assert_not_called()
+
+    def test_retry_after_invalid_or_extreme_is_bounded(self):
+        for header, expected in ((None, 2), ('invalid', 2), ('nan', 2), ('inf', 2), ('-5', 0), ('9999', 60)):
+            client, _ = fmc(response(status=429, headers={'Retry-After': header}), response({'ok': True}))
+            with self.subTest(header=header):
+                self.assertTrue(client.get('/object/hosts/a')['ok'])
+                client.sleep.assert_called_once_with(expected)
+
     def test_csm_incomplete(self):
         client, _ = csm(response(text='<policyConfigDeviceResponse><policy>' + xml_rule() + '</policy><endIndex>1</endIndex><totalCount>3</totalCount></policyConfigDeviceResponse>'), response(text='<policyConfigDeviceResponse><policy/></policyConfigDeviceResponse>'))
         with self.assertRaises(ValidationError):
