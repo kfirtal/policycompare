@@ -19,3 +19,6 @@ reports/
 logs/
 snapshots/
 *.snapshot.json
+
+# Transfer bundles, downloaded wheels and isolated installation checks
+dist/

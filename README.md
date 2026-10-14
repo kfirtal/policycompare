@@ -73,6 +73,10 @@ Ports אינם נבדקים ואינם מכשילים בדיקה בגלל הבד
 
 ## התקנה ובדיקות
 
+להעברה לרשת מבודדת עם Python 3.12 ו־Artifactory פנימי, ראה
+[TRANSFER_README_HE.md](TRANSFER_README_HE.md). חבילת ההעברה כוללת
+wheelhouse, גרסאות נעולות ו־SHA-256; אין צורך בגישה לאינטרנט להתקנה המקומית.
+
 Python 3.12 ומעלה, עם Requests:
 
 ```powershell
