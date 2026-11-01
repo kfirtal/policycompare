@@ -26,6 +26,8 @@ def parser():
     result.add_argument('--fmc-domain', help='Explicit domain UUID when the account has multiple domains')
     result.add_argument('--csm-ca', help='PEM CA bundle; system trust is used if omitted')
     result.add_argument('--fmc-ca', help='PEM CA bundle; system trust is used if omitted')
+    result.add_argument('--insecure', action='store_true',
+                        help='Skip TLS certificate verification for both development servers in this run')
     result.add_argument('--timeout', type=float, default=30, help='Positive timeout per HTTP request, seconds')
     result.add_argument('--output-dir', required=True, type=Path, help='New directory under reports/')
     result.add_argument('--allow-empty', action='store_true')
@@ -52,6 +54,8 @@ def validate_settings(args):
             raise ValidationError('Policy names and version must be nonempty without surrounding whitespace')
     if args.fmc_domain is not None and (not args.fmc_domain.strip() or args.fmc_domain != args.fmc_domain.strip()):
         raise ValidationError('Invalid domain identifier')
+    if args.insecure and (args.csm_ca or args.fmc_ca):
+        raise ValidationError('Choose either --insecure or CA bundles, not both')
     for bundle in (args.csm_ca, args.fmc_ca):
         if bundle is not None and not Path(bundle).is_file():
             raise ValidationError('CA bundle must be an existing file')
@@ -106,11 +110,13 @@ def run_lab(args):
     args.output_dir.mkdir(parents=True, exist_ok=False)
     clients, completed, cleanup_errors = [], [], []
     started, stage = utc_now(), 'client_setup'
+    csm_verify = False if args.insecure else args.csm_ca or True
+    fmc_verify = False if args.insecure else args.fmc_ca or True
     try:
-        csm = CSMClient(args.csm_url, verify=args.csm_ca or True, timeout=args.timeout)
+        csm = CSMClient(args.csm_url, verify=csm_verify, timeout=args.timeout)
         clients.append(('csm_cleanup', csm))
         fmc = FMCClient(args.fmc_url, domain=args.fmc_domain,
-                        verify=args.fmc_ca or True, timeout=args.timeout)
+                        verify=fmc_verify, timeout=args.timeout)
         clients.append(('fmc_cleanup', fmc))
         stage = 'csm_login'
         login_interactively(csm, 'CSM')
@@ -146,6 +152,7 @@ def run_lab(args):
     if cleanup_errors:
         result['status'] = 'INDETERMINATE'
     manifest = dict(status=result['status'], started_utc=started, finished_utc=utc_now(),
+                    tls_verification={'csm': csm_verify is not False, 'fmc': fmc_verify is not False},
                     declared_versions={'csm': '4.25', 'fmc': args.fmc_version},
                     completed_snapshots=completed, cleanup_errors=cleanup_errors,
                     rules_status=result['rules_report']['status'],
@@ -162,6 +169,8 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         validate_settings(args)
+        if args.insecure:
+            print('שים לב: אימות תעודות TLS מבוטל עבור שני שרתי הפיתוח בהרצה זו.')
         if not args.connect:
             print('בדיקת הגדרות מקומית הושלמה. לא בוצעו חיבורים או בדיקת זמינות שרתים.')
             return 0
