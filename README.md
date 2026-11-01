@@ -1,5 +1,7 @@
 # PolicyCompare
 
+הוראות הפעלה מלאות, מיקום התוצאות וארכיטקטורה: [RUN_GUIDE_HE.txt](RUN_GUIDE_HE.txt).
+
 השוואת מדיניות CSM ו־FMC בשני דוחות נפרדים:
 
 1. **חוקים**: שמות Source Objects, שמות Destination Objects ופרוטוקול/פורטי Destination Services.
