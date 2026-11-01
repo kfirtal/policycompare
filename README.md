@@ -2,6 +2,11 @@
 
 הוראות הפעלה מלאות, מיקום התוצאות וארכיטקטורה: [RUN_GUIDE_HE.txt](RUN_GUIDE_HE.txt).
 
+חבילת ההעברה המלאה לרשת העבודה נמצאת ב־[transfer/PolicyCompare-Windows-Python312-TLS-Guide.zip](transfer/PolicyCompare-Windows-Python312-TLS-Guide.zip),
+ולצידה [חתימת SHA-256](transfer/PolicyCompare-Windows-Python312-TLS-Guide.zip.sha256).
+החבילה כוללת קוד, בדיקות, תלויות להתקנה ללא אינטרנט ומדריך TXT בעברית,
+כולל אפשרות `--insecure`. יש להעבירה לפי תהליך ההלבנה הארגוני.
+
 השוואת מדיניות CSM ו־FMC בשני דוחות נפרדים:
 
 1. **חוקים**: שמות Source Objects, שמות Destination Objects ופרוטוקול/פורטי Destination Services.
