@@ -84,6 +84,6 @@ Real snapshots and reports contain infrastructure information. Keep them private
 - [Synthetic example and expected outcome](examples/README.md)
 - [Hebrew operating guide](RUN_GUIDE_HE.txt)
 - [Security notes](SECURITY.md)
-- Offline tests: `python -m unittest discover -s tests -v`
+- Offline tests: after installing the pinned dependencies above, run `python -m unittest discover -s tests -v`. API calls are mocked; no Cisco servers or credentials are needed.
 
 No live Cisco environment was contacted for the portfolio demo. Offline validation does not establish production readiness.
