@@ -1,4 +1,4 @@
-# PolicyCompare — CSM to FMC synchronization review
+# PolicyCompare - CSM to FMC synchronization review
 
 CSM is the source of truth. FMC was initially populated by a one-time copy, while policy changes continued in CSM. This tool identifies the resulting drift so an engineer can review the corrections required in FMC.
 
