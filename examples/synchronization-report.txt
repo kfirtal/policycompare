@@ -1,0 +1,52 @@
+SYNTHETIC EXAMPLE — no organizational data
+
+CSM -> FMC synchronization review (read-only)
+CSM is the source of truth; FMC is the comparison target.
+Result: DRIFT FOUND
+CSM rules: 3
+FMC rules: 3
+Compared: src_objects, dst_objects, dst_services and referenced object values.
+Not compared: rule order, action, enabled state, source ports, zones or users.
+
+1. CSM rule signatures missing in FMC: 3
+Review these CSM rules for addition or correction in FMC.
+Rule 0: sources=['clients'], destinations=['@any'], services=[('tcp', 443, 443)]
+Rule 1: sources=['clients'], destinations=['@any'], services=[('tcp', 443, 443)]
+Rule new-ssh: sources=['@any'], destinations=['@any'], services=[('tcp', 22, 22)]
+
+2. FMC rule signatures not present in CSM: 3
+Review for stale/modified rules. Do not delete automatically.
+Rule fmc-0: sources=['clients'], destinations=['@any'], services=[('tcp', 8443, 8443)]
+Rule fmc-1: sources=['clients'], destinations=['@any'], services=[('tcp', 8443, 8443)]
+Rule stale-dns: sources=['@any'], destinations=['@any'], services=[('udp', 53, 53)]
+
+3. Same-name objects with different values: 4
+network object: client-a
+  Expected (CSM): ('192.0.2.10/32',)
+  Current  (FMC): ('192.0.2.20/32',)
+  CSM affected rules: ['0', '1']
+  FMC affected rules: ['fmc-0', 'fmc-1']
+network object: clients
+  Expected (CSM): ('192.0.2.10/32',)
+  Current  (FMC): ('192.0.2.20/32',)
+  CSM affected rules: ['0', '1']
+  FMC affected rules: ['fmc-0', 'fmc-1']
+service object: https
+  Expected (CSM): (('tcp', 443, 443),)
+  Current  (FMC): (('tcp', 8443, 8443),)
+  CSM affected rules: ['0', '1']
+  FMC affected rules: ['fmc-0', 'fmc-1']
+service object: web
+  Expected (CSM): (('tcp', 443, 443),)
+  Current  (FMC): (('tcp', 8443, 8443),)
+  CSM affected rules: ['0', '1']
+  FMC affected rules: ['fmc-0', 'fmc-1']
+
+4. Referenced only by CSM policy: 0
+
+5. Referenced only by FMC policy: 0
+
+Object inventories cover selected-policy references, not all objects on the server.
+A modified service can appear as one missing and one extra signature; rule IDs differ across systems.
+Duplicate signatures are compared by presence, not count. No rule pairing is guessed.
+No changes were applied. A match does not prove effective traffic equivalence.

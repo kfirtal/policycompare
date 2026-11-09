@@ -1,24 +1,5 @@
-# Python
 __pycache__/
 *.pyc
 .venv/
-venv/
-.deps/
-
-# Secrets
 .env
-.env.*
-!.env.example
-
-# IDE
-.vscode/
-.idea/
-
-# Generated and internal data
 reports/
-logs/
-snapshots/
-*.snapshot.json
-
-# Transfer bundles, downloaded wheels and isolated installation checks
-dist/
